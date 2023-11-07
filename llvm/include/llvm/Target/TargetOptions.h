@@ -148,10 +148,11 @@ namespace llvm {
           EmulatedTLS(false), EnableTLSDESC(false), EnableIPRA(false),
           EmitStackSizeSection(false), EnableMachineOutliner(false),
           EnableMachineFunctionSplitter(false), SupportsDefaultOutlining(false),
-          EmitAddrsig(false), EmitCallSiteInfo(false),
-          SupportsDebugEntryValues(false), EnableDebugEntryValues(false),
-          ValueTrackingVariableLocations(false), ForceDwarfFrameSection(false),
-          XRayFunctionIndex(true), DebugStrictDwarf(false), Hotpatch(false),
+          EmitAddrsig(false), EmitCallGraphSection(false),
+          EmitCallSiteInfo(false), SupportsDebugEntryValues(false),
+          EnableDebugEntryValues(false), ValueTrackingVariableLocations(false),
+          ForceDwarfFrameSection(false), XRayFunctionIndex(true),
+          DebugStrictDwarf(false), Hotpatch(false),
           PPCGenScalarMASSEntries(false), JMCInstrument(false),
           EnableCFIFixup(false), MisExpect(false), XCOFFReadOnlyPointers(false),
           FPDenormalMode(DenormalMode::IEEE, DenormalMode::IEEE) {}
@@ -322,6 +323,9 @@ namespace llvm {
     /// Memory Buffer that contains information on sampled basic blocks and used
     /// to selectively generate basic block sections.
     std::shared_ptr<MemoryBuffer> BBSectionsFuncListBuf;
+
+    /// Emit section containing call graph metadata.
+    unsigned EmitCallGraphSection : 1;
 
     /// The flag enables call site info production. It is used only for debug
     /// info, and it is restricted only to optimized code. This can be used for
