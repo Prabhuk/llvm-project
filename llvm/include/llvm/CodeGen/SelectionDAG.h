@@ -279,7 +279,6 @@ class SelectionDAG {
   SDDbgInfo *DbgInfo;
 
   using CallSiteInfo = MachineFunction::CallSiteInfo;
-  using CallSiteInfoImpl = MachineFunction::CallSiteInfoImpl;
 
   struct NodeExtraInfo {
     CallSiteInfo CSInfo;
