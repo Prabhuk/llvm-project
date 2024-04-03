@@ -85,11 +85,11 @@ CGOPT(bool, StackRealign)
 CGOPT(std::string, TrapFuncName)
 CGOPT(bool, UseCtors)
 CGOPT(bool, DisableIntegratedAS)
-CGOPT(bool, RelaxELFRelocations)
 CGOPT_EXP(bool, DataSections)
 CGOPT_EXP(bool, FunctionSections)
 CGOPT(bool, IgnoreXCOFFVisibility)
 CGOPT(bool, XCOFFTracebackTable)
+CGOPT(bool, EnableBBAddrMap)
 CGOPT(std::string, BBSections)
 CGOPT(unsigned, TLSSize)
 CGOPT_EXP(bool, EmulatedTLS)
@@ -100,6 +100,7 @@ CGOPT(EABI, EABIVersion)
 CGOPT(DebuggerKind, DebuggerTuningOpt)
 CGOPT(bool, EnableStackSizeSection)
 CGOPT(bool, EnableAddrsig)
+CGOPT(bool, EnableCallGraphSection)
 CGOPT(bool, EmitCallSiteInfo)
 CGOPT(bool, EnableMachineFunctionSplitter)
 CGOPT(bool, EnableDebugEntryValues)
@@ -361,13 +362,6 @@ codegen::RegisterCodeGenFlags::RegisterCodeGenFlags() {
                                 cl::init(false));
   CGBINDOPT(UseCtors);
 
-  static cl::opt<bool> RelaxELFRelocations(
-      "relax-elf-relocations",
-      cl::desc(
-          "Emit GOTPCRELX/REX_GOTPCRELX instead of GOTPCREL on x86-64 ELF"),
-      cl::init(true));
-  CGBINDOPT(RelaxELFRelocations);
-
   static cl::opt<bool> DataSections(
       "data-sections", cl::desc("Emit data into separate sections"),
       cl::init(false));
@@ -389,6 +383,11 @@ codegen::RegisterCodeGenFlags::RegisterCodeGenFlags() {
       "xcoff-traceback-table", cl::desc("Emit the XCOFF traceback table"),
       cl::init(true));
   CGBINDOPT(XCOFFTracebackTable);
+
+  static cl::opt<bool> EnableBBAddrMap(
+      "basic-block-address-map",
+      cl::desc("Emit the basic block address map section"), cl::init(false));
+  CGBINDOPT(EnableBBAddrMap);
 
   static cl::opt<std::string> BBSections(
       "basic-block-sections",
@@ -451,6 +450,11 @@ codegen::RegisterCodeGenFlags::RegisterCodeGenFlags() {
       "addrsig", cl::desc("Emit an address-significance table"),
       cl::init(false));
   CGBINDOPT(EnableAddrsig);
+
+  static cl::opt<bool> EnableCallGraphSection(
+      "call-graph-section", cl::desc("Emit a call graph section"),
+      cl::init(false));
+  CGBINDOPT(EnableCallGraphSection);
 
   static cl::opt<bool> EmitCallSiteInfo(
       "emit-call-site-info",
@@ -562,12 +566,12 @@ codegen::InitTargetOptionsFromCodeGenFlags(const Triple &TheTriple) {
   Options.StackSymbolOrdering = getStackSymbolOrdering();
   Options.UseInitArray = !getUseCtors();
   Options.DisableIntegratedAS = getDisableIntegratedAS();
-  Options.RelaxELFRelocations = getRelaxELFRelocations();
   Options.DataSections =
       getExplicitDataSections().value_or(TheTriple.hasDefaultDataSections());
   Options.FunctionSections = getFunctionSections();
   Options.IgnoreXCOFFVisibility = getIgnoreXCOFFVisibility();
   Options.XCOFFTracebackTable = getXCOFFTracebackTable();
+  Options.BBAddrMap = getEnableBBAddrMap();
   Options.BBSections = getBBSectionsMode(Options);
   Options.UniqueSectionNames = getUniqueSectionNames();
   Options.UniqueBasicBlockSectionNames = getUniqueBasicBlockSectionNames();
@@ -580,6 +584,7 @@ codegen::InitTargetOptionsFromCodeGenFlags(const Triple &TheTriple) {
   Options.EmitStackSizeSection = getEnableStackSizeSection();
   Options.EnableMachineFunctionSplitter = getEnableMachineFunctionSplitter();
   Options.EmitAddrsig = getEnableAddrsig();
+  Options.EmitCallGraphSection = getEnableCallGraphSection();
   Options.EmitCallSiteInfo = getEmitCallSiteInfo();
   Options.EnableDebugEntryValues = getEnableDebugEntryValues();
   Options.ForceDwarfFrameSection = getForceDwarfFrameSection();

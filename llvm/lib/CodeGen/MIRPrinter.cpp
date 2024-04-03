@@ -540,12 +540,15 @@ void MIRPrinter::convertCallSiteObjects(yaml::MachineFunction &YMF,
         std::distance(CallI->getParent()->instr_begin(), CallI);
     YmlCS.CallLocation = CallLocation;
     // Construct call arguments and theirs forwarding register info.
-    for (auto ArgReg : CSInfo.second) {
+    for (auto ArgReg : CSInfo.second.ArgRegPairs) {
       yaml::CallSiteInfo::ArgRegPair YmlArgReg;
       YmlArgReg.ArgNo = ArgReg.ArgNo;
       printRegMIR(ArgReg.Reg, YmlArgReg.Reg, TRI);
       YmlCS.ArgForwardingRegs.emplace_back(YmlArgReg);
     }
+    // Get type id.
+    if (CSInfo.second.TypeId)
+      YmlCS.TypeId = CSInfo.second.TypeId->getZExtValue();
     YMF.CallSitesInfo.push_back(YmlCS);
   }
 
@@ -694,7 +697,9 @@ void MIPrinter::print(const MachineBasicBlock &MBB) {
   // fallthrough.
   if ((!MBB.succ_empty() && !SimplifyMIR) || !canPredictProbs ||
       !canPredictSuccessors(MBB)) {
-    OS.indent(2) << "successors: ";
+    OS.indent(2) << "successors:";
+    if (!MBB.succ_empty())
+      OS << " ";
     for (auto I = MBB.succ_begin(), E = MBB.succ_end(); I != E; ++I) {
       if (I != MBB.succ_begin())
         OS << ", ";
@@ -726,7 +731,7 @@ void MIPrinter::print(const MachineBasicBlock &MBB) {
     HasLineAttributes = true;
   }
 
-  if (HasLineAttributes)
+  if (HasLineAttributes && !MBB.empty())
     OS << "\n";
   bool IsInBundle = false;
   for (const MachineInstr &MI : MBB.instrs()) {
@@ -804,6 +809,10 @@ void MIPrinter::print(const MachineInstr &MI) {
     OS << "unpredictable ";
   if (MI.getFlag(MachineInstr::NoConvergent))
     OS << "noconvergent ";
+  if (MI.getFlag(MachineInstr::NonNeg))
+    OS << "nneg ";
+  if (MI.getFlag(MachineInstr::Disjoint))
+    OS << "disjoint ";
 
   OS << TII->getName(MI.getOpcode());
   if (I < E)
@@ -980,7 +989,7 @@ void MIRFormatter::printIRValue(raw_ostream &OS, const Value &V,
 }
 
 void llvm::printMIR(raw_ostream &OS, const Module &M) {
-  // RemoveDIs: as there's no textual form for DPValues yet, print debug-info
+  // RemoveDIs: as there's no textual form for DbgRecords yet, print debug-info
   // in dbg.value format.
   bool IsNewDbgInfoFormat = M.IsNewDbgInfoFormat;
   if (IsNewDbgInfoFormat)
@@ -994,7 +1003,7 @@ void llvm::printMIR(raw_ostream &OS, const Module &M) {
 }
 
 void llvm::printMIR(raw_ostream &OS, const MachineFunction &MF) {
-  // RemoveDIs: as there's no textual form for DPValues yet, print debug-info
+  // RemoveDIs: as there's no textual form for DbgRecords yet, print debug-info
   // in dbg.value format.
   bool IsNewDbgInfoFormat = MF.getFunction().IsNewDbgInfoFormat;
   if (IsNewDbgInfoFormat)

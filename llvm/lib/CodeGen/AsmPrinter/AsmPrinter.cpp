@@ -151,8 +151,9 @@ static cl::bits<PGOMapFeaturesEnum> PgoAnalysisMapFeatures(
                           "Basic Block Frequency"),
                clEnumValN(PGOMapFeaturesEnum::BrProb, "br-prob",
                           "Branch Probability")),
-    cl::desc("Enable extended information within the BBAddrMap that is "
-             "extracted from PGO related analysis."));
+    cl::desc(
+        "Enable extended information within the SHT_LLVM_BB_ADDR_MAP that is "
+        "extracted from PGO related analysis."));
 
 const char DWARFGroupName[] = "dwarf";
 const char DWARFGroupDescription[] = "DWARF Emission";
@@ -537,8 +538,10 @@ bool AsmPrinter::doInitialization(Module &M) {
   if (!M.getModuleInlineAsm().empty()) {
     OutStreamer->AddComment("Start of file scope inline assembly");
     OutStreamer->addBlankLine();
-    emitInlineAsm(M.getModuleInlineAsm() + "\n", *TM.getMCSubtargetInfo(),
-                  TM.Options.MCOptions);
+    emitInlineAsm(
+        M.getModuleInlineAsm() + "\n", *TM.getMCSubtargetInfo(),
+        TM.Options.MCOptions, nullptr,
+        InlineAsm::AsmDialect(TM.getMCAsmInfo()->getAssemblerDialect()));
     OutStreamer->AddComment("End of file scope inline assembly");
     OutStreamer->addBlankLine();
   }
@@ -1105,25 +1108,21 @@ static void emitComments(const MachineInstr &MI, raw_ostream &CommentOS) {
 
   // We assume a single instruction only has a spill or reload, not
   // both.
-  std::optional<unsigned> Size;
+  std::optional<LocationSize> Size;
   if ((Size = MI.getRestoreSize(TII))) {
-    CommentOS << *Size << "-byte Reload\n";
+    CommentOS << Size->getValue() << "-byte Reload\n";
   } else if ((Size = MI.getFoldedRestoreSize(TII))) {
-    if (*Size) {
-      if (*Size == unsigned(MemoryLocation::UnknownSize))
-        CommentOS << "Unknown-size Folded Reload\n";
-      else
-        CommentOS << *Size << "-byte Folded Reload\n";
-    }
+    if (!Size->hasValue())
+      CommentOS << "Unknown-size Folded Reload\n";
+    else if (Size->getValue())
+      CommentOS << Size->getValue() << "-byte Folded Reload\n";
   } else if ((Size = MI.getSpillSize(TII))) {
-    CommentOS << *Size << "-byte Spill\n";
+    CommentOS << Size->getValue() << "-byte Spill\n";
   } else if ((Size = MI.getFoldedSpillSize(TII))) {
-    if (*Size) {
-      if (*Size == unsigned(MemoryLocation::UnknownSize))
-        CommentOS << "Unknown-size Folded Spill\n";
-      else
-        CommentOS << *Size << "-byte Folded Spill\n";
-    }
+    if (!Size->hasValue())
+      CommentOS << "Unknown-size Folded Spill\n";
+    else if (Size->getValue())
+      CommentOS << Size->getValue() << "-byte Folded Spill\n";
   }
 
   // Check for spill-induced copies
@@ -1371,6 +1370,14 @@ static uint32_t getBBAddrMapMetadata(const MachineBasicBlock &MBB) {
       .encode();
 }
 
+static llvm::object::BBAddrMap::Features
+getBBAddrMapFeature(const MachineFunction &MF, int NumMBBSectionRanges) {
+  return {PgoAnalysisMapFeatures.isSet(PGOMapFeaturesEnum::FuncEntryCount),
+          PgoAnalysisMapFeatures.isSet(PGOMapFeaturesEnum::BBFreq),
+          PgoAnalysisMapFeatures.isSet(PGOMapFeaturesEnum::BrProb),
+          MF.hasBBSections() && NumMBBSectionRanges > 1};
+}
+
 void AsmPrinter::emitBBAddrMapSection(const MachineFunction &MF) {
   MCSection *BBAddrMapSection =
       getObjFileLowering().getBBAddrMapSection(*MF.getSection());
@@ -1384,17 +1391,48 @@ void AsmPrinter::emitBBAddrMapSection(const MachineFunction &MF) {
   uint8_t BBAddrMapVersion = OutStreamer->getContext().getBBAddrMapVersion();
   OutStreamer->emitInt8(BBAddrMapVersion);
   OutStreamer->AddComment("feature");
-  auto FeaturesBits = static_cast<uint8_t>(PgoAnalysisMapFeatures.getBits());
-  OutStreamer->emitInt8(FeaturesBits);
-  OutStreamer->AddComment("function address");
-  OutStreamer->emitSymbolValue(FunctionSymbol, getPointerSize());
-  OutStreamer->AddComment("number of basic blocks");
-  OutStreamer->emitULEB128IntValue(MF.size());
-  const MCSymbol *PrevMBBEndSymbol = FunctionSymbol;
+  auto Features = getBBAddrMapFeature(MF, MBBSectionRanges.size());
+  OutStreamer->emitInt8(Features.encode());
   // Emit BB Information for each basic block in the function.
+  if (Features.MultiBBRange) {
+    OutStreamer->AddComment("number of basic block ranges");
+    OutStreamer->emitULEB128IntValue(MBBSectionRanges.size());
+  }
+  // Number of blocks in each MBB section.
+  MapVector<unsigned, unsigned> MBBSectionNumBlocks;
+  const MCSymbol *PrevMBBEndSymbol = nullptr;
+  if (!Features.MultiBBRange) {
+    OutStreamer->AddComment("function address");
+    OutStreamer->emitSymbolValue(FunctionSymbol, getPointerSize());
+    OutStreamer->AddComment("number of basic blocks");
+    OutStreamer->emitULEB128IntValue(MF.size());
+    PrevMBBEndSymbol = FunctionSymbol;
+  } else {
+    unsigned BBCount = 0;
+    for (const MachineBasicBlock &MBB : MF) {
+      BBCount++;
+      if (MBB.isEndSection()) {
+        // Store each section's basic block count when it ends.
+        MBBSectionNumBlocks[MBB.getSectionIDNum()] = BBCount;
+        // Reset the count for the next section.
+        BBCount = 0;
+      }
+    }
+  }
+  // Emit the BB entry for each basic block in the function.
   for (const MachineBasicBlock &MBB : MF) {
     const MCSymbol *MBBSymbol =
         MBB.isEntryBlock() ? FunctionSymbol : MBB.getSymbol();
+    bool IsBeginSection =
+        Features.MultiBBRange && (MBB.isBeginSection() || MBB.isEntryBlock());
+    if (IsBeginSection) {
+      OutStreamer->AddComment("base address");
+      OutStreamer->emitSymbolValue(MBBSymbol, getPointerSize());
+      OutStreamer->AddComment("number of basic blocks");
+      OutStreamer->emitULEB128IntValue(
+          MBBSectionNumBlocks[MBB.getSectionIDNum()]);
+      PrevMBBEndSymbol = MBBSymbol;
+    }
     // TODO: Remove this check when version 1 is deprecated.
     if (BBAddrMapVersion > 1) {
       OutStreamer->AddComment("BB id");
@@ -1416,35 +1454,32 @@ void AsmPrinter::emitBBAddrMapSection(const MachineFunction &MF) {
     PrevMBBEndSymbol = MBB.getEndSymbol();
   }
 
-  if (FeaturesBits != 0) {
+  if (Features.hasPGOAnalysis()) {
     assert(BBAddrMapVersion >= 2 &&
            "PGOAnalysisMap only supports version 2 or later");
 
-    auto FeatEnable =
-        cantFail(object::PGOAnalysisMap::Features::decode(FeaturesBits));
-
-    if (FeatEnable.FuncEntryCount) {
+    if (Features.FuncEntryCount) {
       OutStreamer->AddComment("function entry count");
       auto MaybeEntryCount = MF.getFunction().getEntryCount();
       OutStreamer->emitULEB128IntValue(
           MaybeEntryCount ? MaybeEntryCount->getCount() : 0);
     }
     const MachineBlockFrequencyInfo *MBFI =
-        FeatEnable.BBFreq
+        Features.BBFreq
             ? &getAnalysis<LazyMachineBlockFrequencyInfoPass>().getBFI()
             : nullptr;
     const MachineBranchProbabilityInfo *MBPI =
-        FeatEnable.BrProb ? &getAnalysis<MachineBranchProbabilityInfo>()
-                          : nullptr;
+        Features.BrProb ? &getAnalysis<MachineBranchProbabilityInfo>()
+                        : nullptr;
 
-    if (FeatEnable.BBFreq || FeatEnable.BrProb) {
+    if (Features.BBFreq || Features.BrProb) {
       for (const MachineBasicBlock &MBB : MF) {
-        if (FeatEnable.BBFreq) {
+        if (Features.BBFreq) {
           OutStreamer->AddComment("basic block frequency");
           OutStreamer->emitULEB128IntValue(
               MBFI->getBlockFreq(&MBB).getFrequency());
         }
-        if (FeatEnable.BrProb) {
+        if (Features.BrProb) {
           unsigned SuccCount = MBB.succ_size();
           OutStreamer->AddComment("basic block successor count");
           OutStreamer->emitULEB128IntValue(SuccCount);
@@ -1555,6 +1590,105 @@ void AsmPrinter::emitStackUsage(const MachineFunction &MF) {
     *StackUsageStream << "dynamic\n";
   else
     *StackUsageStream << "static\n";
+}
+
+/// Extracts a generalized numeric type identifier of a Function's type from
+/// type metadata. Returns null if metadata cannot be found.
+static ConstantInt *extractNumericCGTypeId(const Function &F) {
+  SmallVector<MDNode *, 2> Types;
+  F.getMetadata(LLVMContext::MD_type, Types);
+  MDString *MDGeneralizedTypeId = nullptr;
+  for (const auto &Type : Types) {
+    if (Type->getNumOperands() == 2 && isa<MDString>(Type->getOperand(1))) {
+      auto *TMDS = cast<MDString>(Type->getOperand(1));
+      if (TMDS->getString().ends_with("generalized")) {
+        MDGeneralizedTypeId = TMDS;
+        break;
+      }
+    }
+  }
+
+  if (!MDGeneralizedTypeId) {
+    errs() << "warning: can't find indirect target type id metadata "
+           << "for " << F.getName() << "\n";
+    return nullptr;
+  }
+
+  uint64_t TypeIdVal = llvm::MD5Hash(MDGeneralizedTypeId->getString());
+  Type *Int64Ty = Type::getInt64Ty(F.getContext());
+  return cast<ConstantInt>(ConstantInt::get(Int64Ty, TypeIdVal));
+}
+
+/// Emits call graph section.
+void AsmPrinter::emitCallGraphSection(const MachineFunction &MF,
+                                      FunctionInfo &FuncInfo) {
+  if (!MF.getTarget().Options.EmitCallGraphSection)
+    return;
+
+  // Switch to the call graph section for the function
+  MCSection *FuncCGSection =
+      getObjFileLowering().getCallGraphSection(*getCurrentSection());
+  assert(FuncCGSection && "null call graph section");
+  OutStreamer->pushSection();
+  OutStreamer->switchSection(FuncCGSection);
+
+  // Emit format version number.
+  OutStreamer->emitInt64(0);
+
+  // Emit function's self information, which is composed of:
+  //  1) FunctionEntryPc
+  //  2) FunctionKind: Whether the function is indirect target, and if so,
+  //     whether its type id is known.
+  //  3) FunctionTypeId: Emit only when the function is an indirect target
+  //     and its type id is known.
+
+  // Emit function entry pc.
+  const MCSymbol *FunctionSymbol = getFunctionBegin();
+  OutStreamer->emitSymbolValue(FunctionSymbol, TM.getProgramPointerSize());
+
+  // If this function has external linkage or has its address taken and
+  // it is not a callback, then anything could call it.
+  const Function &F = MF.getFunction();
+  bool IsIndirectTarget =
+      !F.hasLocalLinkage() || F.hasAddressTaken(nullptr,
+                                                /*IgnoreCallbackUses=*/true,
+                                                /*IgnoreAssumeLikeCalls=*/true,
+                                                /*IgnoreLLVMUsed=*/false);
+
+  // FIXME: FunctionKind takes a few values but emitted as a 64-bit value.
+  // Can be optimized to occupy 2 bits instead.
+  // Emit function kind, and type id if available.
+  if (!IsIndirectTarget) {
+    OutStreamer->emitInt64(FunctionInfo::FunctionKind::NOT_INDIRECT_TARGET);
+  } else {
+    const auto *TypeId = extractNumericCGTypeId(F);
+    if (TypeId) {
+      OutStreamer->emitInt64(
+          FunctionInfo::FunctionKind::INDIRECT_TARGET_KNOWN_TID);
+      OutStreamer->emitInt64(TypeId->getZExtValue());
+    } else {
+      OutStreamer->emitInt64(
+          FunctionInfo::FunctionKind::INDIRECT_TARGET_UNKNOWN_TID);
+    }
+  }
+
+  // Emit callsite labels, where each element is a pair of type id and
+  // indirect callsite pc.
+  const auto &CallSiteLabels = FuncInfo.CallSiteLabels;
+
+  // Emit the count of pairs.
+  OutStreamer->emitInt64(CallSiteLabels.size());
+
+  // Emit the type id and call site label pairs.
+  for (const std::pair<uint64_t, MCSymbol *> &El : CallSiteLabels) {
+    auto TypeId = El.first;
+    const auto &Label = El.second;
+    OutStreamer->emitInt64(TypeId);
+    OutStreamer->emitSymbolValue(Label, TM.getProgramPointerSize());
+  }
+  FuncInfo.CallSiteLabels.clear();
+
+  OutStreamer->popSection();
 }
 
 void AsmPrinter::emitPCSectionsLabel(const MachineFunction &MF,
@@ -1706,6 +1840,8 @@ void AsmPrinter::emitFunctionBody() {
   bool IsEHa = MMI->getModule()->getModuleFlag("eh-asynch");
 
   bool CanDoExtraAnalysis = ORE->allowExtraAnalysis(DEBUG_TYPE);
+  FunctionInfo FuncInfo;
+  const auto &CallSitesInfoMap = MF->getCallSitesInfo();
   for (auto &MBB : *MF) {
     // Print a label for the basic block.
     emitBasicBlockStart(MBB);
@@ -1819,6 +1955,26 @@ void AsmPrinter::emitFunctionBody() {
         break;
       }
 
+      // FIXME: Some indirect calls can get lowered to jump instructions,
+      // resulting in emitting labels for them. The extra information can
+      // be neglected while disassembling but still takes space in the binary.
+      if (TM.Options.EmitCallGraphSection && MI.isCall()) {
+        // Only indirect calls have type identifiers set.
+        const auto &CallSiteInfo = CallSitesInfoMap.find(&MI);
+        if (CallSiteInfo != CallSitesInfoMap.end()) {
+          if (auto *TypeId = CallSiteInfo->second.TypeId) {
+            // Emit label.
+            MCSymbol *S = MF->getContext().createTempSymbol();
+            OutStreamer->emitLabel(S);
+
+            // Get type id value.
+            uint64_t TypeIdVal = TypeId->getZExtValue();
+
+            // Add to function's callsite labels.
+            FuncInfo.CallSiteLabels.emplace_back(TypeIdVal, S);
+          }
+        }
+      }
       // If there is a post-instruction symbol, emit a label for it here.
       if (MCSymbol *S = MI.getPostInstrSymbol())
         OutStreamer->emitLabel(S);
@@ -1833,7 +1989,7 @@ void AsmPrinter::emitFunctionBody() {
     // We must emit temporary symbol for the end of this basic block, if either
     // we have BBLabels enabled or if this basic blocks marks the end of a
     // section.
-    if (MF->hasBBLabels() ||
+    if (MF->hasBBLabels() || MF->getTarget().Options.BBAddrMap ||
         (MAI->hasDotTypeDotSizeDirective() && MBB.isEndSection()))
       OutStreamer->emitLabel(MBB.getEndSymbol());
 
@@ -1986,7 +2142,7 @@ void AsmPrinter::emitFunctionBody() {
   // Emit section containing BB address offsets and their metadata, when
   // BB labels are requested for this function. Skip empty functions.
   if (HasAnyRealCode) {
-    if (MF->hasBBLabels())
+    if (MF->hasBBLabels() || MF->getTarget().Options.BBAddrMap)
       emitBBAddrMapSection(*MF);
     else if (PgoAnalysisMapFeatures.getBits() != 0)
       MF->getContext().reportWarning(
@@ -1999,6 +2155,9 @@ void AsmPrinter::emitFunctionBody() {
 
   // Emit section containing stack size metadata.
   emitStackSizeSection(*MF);
+
+  // Emit section containing call graph metadata.
+  emitCallGraphSection(*MF, FuncInfo);
 
   // Emit .su file containing function stack size information.
   emitStackUsage(*MF);
@@ -2090,7 +2249,7 @@ void AsmPrinter::emitGlobalGOTEquivs() {
     emitGlobalVariable(GV);
 }
 
-void AsmPrinter::emitGlobalAlias(Module &M, const GlobalAlias &GA) {
+void AsmPrinter::emitGlobalAlias(const Module &M, const GlobalAlias &GA) {
   MCSymbol *Name = getSymbol(&GA);
   bool IsFunction = GA.getValueType()->isFunctionTy();
   // Treat bitcasts of functions as functions also. This is important at least
@@ -2580,9 +2739,10 @@ void AsmPrinter::SetupMachineFunction(MachineFunction &MF) {
   bool NeedsLocalForSize = MAI->needsLocalForSize();
   if (F.hasFnAttribute("patchable-function-entry") ||
       F.hasFnAttribute("function-instrument") ||
-      F.hasFnAttribute("xray-instruction-threshold") ||
-      needFuncLabels(MF) || NeedsLocalForSize ||
-      MF.getTarget().Options.EmitStackSizeSection || MF.hasBBLabels()) {
+      F.hasFnAttribute("xray-instruction-threshold") || needFuncLabels(MF) ||
+      NeedsLocalForSize || MF.getTarget().Options.EmitStackSizeSection ||
+      MF.getTarget().Options.EmitCallGraphSection ||
+      MF.getTarget().Options.BBAddrMap || MF.hasBBLabels()) {
     CurrentFnBegin = createTempSymbol("func_begin");
     if (NeedsLocalForSize)
       CurrentFnSymForSize = CurrentFnBegin;
@@ -2892,7 +3052,7 @@ bool AsmPrinter::emitSpecialLLVMGlobal(const GlobalVariable *GV) {
     return true;
   }
 
-  report_fatal_error("unknown special variable");
+  report_fatal_error("unknown special variable with appending linkage");
 }
 
 /// EmitLLVMUsedList - For targets that define a MAI::UsedDirective, mark each
@@ -4049,7 +4209,9 @@ bool AsmPrinter::shouldEmitLabelForBasicBlock(
   // With `-fbasic-block-sections=`, a label is needed for every non-entry block
   // in the labels mode (option `=labels`) and every section beginning in the
   // sections mode (`=all` and `=list=`).
-  if ((MF->hasBBLabels() || MBB.isBeginSection()) && !MBB.isEntryBlock())
+  if ((MF->hasBBLabels() || MF->getTarget().Options.BBAddrMap ||
+       MBB.isBeginSection()) &&
+      !MBB.isEntryBlock())
     return true;
   // A label is needed for any block with at least one predecessor (when that
   // predecessor is not the fallthrough predecessor, or if it is an EH funclet

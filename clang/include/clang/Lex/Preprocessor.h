@@ -736,6 +736,19 @@ private:
     State ConditionalStackState = Off;
   } PreambleConditionalStack;
 
+  /// Function for getting the dependency preprocessor directives of a file.
+  ///
+  /// These are directives derived from a special form of lexing where the
+  /// source input is scanned for the preprocessor directives that might have an
+  /// effect on the dependencies for a compilation unit.
+  ///
+  /// Enables a client to cache the directives for a file and provide them
+  /// across multiple compiler invocations.
+  /// FIXME: Allow returning an error.
+  using DependencyDirectivesFn = llvm::unique_function<std::optional<
+      ArrayRef<dependency_directives_scan::Directive>>(FileEntryRef)>;
+  DependencyDirectivesFn DependencyDirectivesForFile;
+
   /// The current top of the stack that we're lexing from if
   /// not expanding a macro and we are lexing directly from source code.
   ///
@@ -1269,6 +1282,11 @@ public:
   /// Returns true if the preprocessor is responsible for generating output,
   /// false if it is producing tokens to be consumed by Parse and Sema.
   bool isPreprocessedOutput() const { return PreprocessedOutput; }
+
+  /// Set the function used to get dependency directives for a file.
+  void setDependencyDirectivesFn(DependencyDirectivesFn Fn) {
+    DependencyDirectivesForFile = std::move(Fn);
+  }
 
   /// Return true if we are lexing directly from the specified lexer.
   bool isCurrentLexer(const PreprocessorLexer *L) const {
@@ -2838,7 +2856,8 @@ public:
     return AnnotationInfos.find(II)->second;
   }
 
-  void emitMacroExpansionWarnings(const Token &Identifier) const {
+  void emitMacroExpansionWarnings(const Token &Identifier,
+                                  bool IsIfnDef = false) const {
     IdentifierInfo *Info = Identifier.getIdentifierInfo();
     if (Info->isDeprecatedMacro())
       emitMacroDeprecationWarning(Identifier);
@@ -2847,12 +2866,12 @@ public:
         !SourceMgr.isInMainFile(Identifier.getLocation()))
       emitRestrictExpansionWarning(Identifier);
 
-    if (Info->getName() == "INFINITY")
-      if (getLangOpts().NoHonorInfs)
+    if (!IsIfnDef) {
+      if (Info->getName() == "INFINITY" && getLangOpts().NoHonorInfs)
         emitRestrictInfNaNWarning(Identifier, 0);
-    if (Info->getName() == "NAN")
-      if (getLangOpts().NoHonorNaNs)
+      if (Info->getName() == "NAN" && getLangOpts().NoHonorNaNs)
         emitRestrictInfNaNWarning(Identifier, 1);
+    }
   }
 
   static void processPathForFileMacro(SmallVectorImpl<char> &Path,

@@ -987,9 +987,12 @@ ASTIdentifierLookupTraitBase::ReadKey(const unsigned char* d, unsigned n) {
 /// Whether the given identifier is "interesting".
 static bool isInterestingIdentifier(ASTReader &Reader, IdentifierInfo &II,
                                     bool IsModule) {
+  bool IsInteresting =
+      II.getNotableIdentifierID() != tok::NotableIdentifierKind::not_notable ||
+      II.getBuiltinID() != Builtin::ID::NotBuiltin ||
+      II.getObjCKeywordID() != tok::ObjCKeywordKind::objc_not_keyword;
   return II.hadMacroDefinition() || II.isPoisoned() ||
-         (!IsModule && II.getObjCOrBuiltinID()) ||
-         II.hasRevertedTokenIDToIdentifier() ||
+         (!IsModule && IsInteresting) || II.hasRevertedTokenIDToIdentifier() ||
          (!(IsModule && Reader.getPreprocessor().getLangOpts().CPlusPlus) &&
           II.getFETokenInfo());
 }
@@ -6619,17 +6622,17 @@ void ASTReader::ReadPragmaDiagnosticMappings(DiagnosticsEngine &Diag) {
     while (NumLocations--) {
       assert(Idx < Record.size() &&
              "Invalid data, missing pragma diagnostic states");
-      SourceLocation Loc = ReadSourceLocation(F, Record[Idx++]);
-      auto IDAndOffset = SourceMgr.getDecomposedLoc(Loc);
-      assert(IDAndOffset.first.isValid() && "invalid FileID for transition");
-      assert(IDAndOffset.second == 0 && "not a start location for a FileID");
+      FileID FID = ReadFileID(F, Record, Idx);
+      assert(FID.isValid() && "invalid FileID for transition");
+      // FIXME: Remove this once we don't need the side-effects.
+      (void)SourceMgr.getSLocEntryOrNull(FID);
       unsigned Transitions = Record[Idx++];
 
       // Note that we don't need to set up Parent/ParentOffset here, because
       // we won't be changing the diagnostic state within imported FileIDs
       // (other than perhaps appending to the main source file, which has no
       // parent).
-      auto &F = Diag.DiagStatesByLoc.Files[IDAndOffset.first];
+      auto &F = Diag.DiagStatesByLoc.Files[FID];
       F.StateTransitions.reserve(F.StateTransitions.size() + Transitions);
       for (unsigned I = 0; I != Transitions; ++I) {
         unsigned Offset = Record[Idx++];
@@ -6804,6 +6807,10 @@ void TypeLocReader::VisitDecayedTypeLoc(DecayedTypeLoc TL) {
 }
 
 void TypeLocReader::VisitAdjustedTypeLoc(AdjustedTypeLoc TL) {
+  // nothing to do
+}
+
+void TypeLocReader::VisitArrayParameterTypeLoc(ArrayParameterTypeLoc TL) {
   // nothing to do
 }
 
@@ -6990,6 +6997,10 @@ void TypeLocReader::VisitEnumTypeLoc(EnumTypeLoc TL) {
 
 void TypeLocReader::VisitAttributedTypeLoc(AttributedTypeLoc TL) {
   TL.setAttr(ReadAttr());
+}
+
+void TypeLocReader::VisitCountAttributedTypeLoc(CountAttributedTypeLoc TL) {
+  // Nothing to do
 }
 
 void TypeLocReader::VisitBTFTagAttributedTypeLoc(BTFTagAttributedTypeLoc TL) {
@@ -9113,6 +9124,10 @@ DeclarationNameInfo ASTRecordReader::readDeclarationNameInfo() {
   return NameInfo;
 }
 
+TypeCoupledDeclRefInfo ASTRecordReader::readTypeCoupledDeclRefInfo() {
+  return TypeCoupledDeclRefInfo(readDeclAs<ValueDecl>(), readBool());
+}
+
 void ASTRecordReader::readQualifierInfo(QualifierInfo &Info) {
   Info.QualifierLoc = readNestedNameSpecifierLoc();
   unsigned NumTPLists = readInt();
@@ -9759,7 +9774,7 @@ void ASTReader::finishPendingActions() {
             !NonConstDefn->isLateTemplateParsed() &&
             // We only perform ODR checks for decls not in the explicit
             // global module fragment.
-            !isFromExplicitGMF(FD) &&
+            !FD->shouldSkipCheckingODR() &&
             FD->getODRHash() != NonConstDefn->getODRHash()) {
           if (!isa<CXXMethodDecl>(FD)) {
             PendingFunctionOdrMergeFailures[FD].push_back(NonConstDefn);
@@ -10349,6 +10364,9 @@ OMPClause *OMPClauseReader::readClause() {
   case llvm::omp::OMPC_relaxed:
     C = new (Context) OMPRelaxedClause();
     break;
+  case llvm::omp::OMPC_weak:
+    C = new (Context) OMPWeakClause();
+    break;
   case llvm::omp::OMPC_threads:
     C = new (Context) OMPThreadsClause();
     break;
@@ -10746,6 +10764,8 @@ void OMPClauseReader::VisitOMPAcquireClause(OMPAcquireClause *) {}
 void OMPClauseReader::VisitOMPReleaseClause(OMPReleaseClause *) {}
 
 void OMPClauseReader::VisitOMPRelaxedClause(OMPRelaxedClause *) {}
+
+void OMPClauseReader::VisitOMPWeakClause(OMPWeakClause *) {}
 
 void OMPClauseReader::VisitOMPThreadsClause(OMPThreadsClause *) {}
 

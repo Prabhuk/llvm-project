@@ -425,14 +425,20 @@ bool MIRParserImpl::initializeCallSiteInfo(
       Register Reg;
       if (parseNamedRegisterReference(PFS, Reg, ArgRegPair.Reg.Value, Error))
         return error(Error, ArgRegPair.Reg.SourceRange);
-      CSInfo.emplace_back(Reg, ArgRegPair.ArgNo);
+      CSInfo.ArgRegPairs.emplace_back(Reg, ArgRegPair.ArgNo);
+    }
+    if (YamlCSInfo.TypeId.has_value()) {
+      IntegerType *Int64Ty = Type::getInt64Ty(Context);
+      CSInfo.TypeId = ConstantInt::get(Int64Ty, YamlCSInfo.TypeId.value(),
+                                       /*isSigned=*/false);
     }
 
-    if (TM.Options.EmitCallSiteInfo)
-      MF.addCallArgsForwardingRegs(&*CallI, std::move(CSInfo));
+    if (TM.Options.EmitCallSiteInfo || TM.Options.EmitCallGraphSection)
+      MF.addCallSiteInfo(&*CallI, std::move(CSInfo));
   }
 
-  if (YamlMF.CallSitesInfo.size() && !TM.Options.EmitCallSiteInfo)
+  if (YamlMF.CallSitesInfo.size() &&
+      !(TM.Options.EmitCallSiteInfo || TM.Options.EmitCallGraphSection))
     return error(Twine("Call site info provided but not used"));
   return false;
 }
@@ -574,7 +580,7 @@ MIRParserImpl::initializeMachineFunction(const yaml::MachineFunction &YamlMF,
   // FIXME: This is a temporary workaround until the reserved registers can be
   // serialized.
   MachineRegisterInfo &MRI = MF.getRegInfo();
-  MRI.freezeReservedRegs(MF);
+  MRI.freezeReservedRegs();
 
   computeFunctionProperties(MF);
 
@@ -607,7 +613,7 @@ bool MIRParserImpl::parseRegisterInfo(PerFunctionMIParsingState &PFS,
                        Twine(VReg.ID.Value) + "'");
     Info.Explicit = true;
 
-    if (StringRef(VReg.Class.Value).equals("_")) {
+    if (VReg.Class.Value == "_") {
       Info.Kind = VRegInfo::GENERIC;
       Info.D.RegBank = nullptr;
     } else {
