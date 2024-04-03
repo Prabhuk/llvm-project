@@ -98,8 +98,6 @@ bool getUseCtors();
 
 bool getDisableIntegratedAS();
 
-bool getRelaxELFRelocations();
-
 bool getDataSections();
 std::optional<bool> getExplicitDataSections();
 
@@ -132,6 +130,8 @@ bool getEnableStackSizeSection();
 
 bool getEnableAddrsig();
 
+bool getEnableCallGraphSection();
+
 bool getEmitCallSiteInfo();
 
 bool getEnableMachineFunctionSplitter();
@@ -158,6 +158,8 @@ bool getXCOFFReadOnlyPointers();
 struct RegisterCodeGenFlags {
   RegisterCodeGenFlags();
 };
+
+bool getEnableBBAddrMap();
 
 llvm::BasicBlockSection getBBSectionsMode(llvm::TargetOptions &Options);
 
