@@ -349,6 +349,8 @@ static bool Wide;
 std::string objdump::Prefix;
 uint32_t objdump::PrefixStrip;
 
+static bool QuietDisasm = false;
+
 DebugVarsFormat objdump::DbgVariables = DVDisabled;
 
 int objdump::DbgIndent = 52;
@@ -1601,6 +1603,8 @@ fetchBinaryByBuildID(const ObjectFile &Obj) {
   return std::move(*DebugBinary);
 }
 
+static raw_ostream &disasmOuts() { return QuietDisasm ? nulls() : outs(); }
+
 static void
 disassembleObject(ObjectFile &Obj, const ObjectFile &DbgObj,
                   DisassemblerTarget &PrimaryTarget,
@@ -2004,10 +2008,10 @@ disassembleObject(ObjectFile &Obj, const ObjectFile &DbgObj,
 
       if (!PrintedSection) {
         PrintedSection = true;
-        outs() << "\nDisassembly of section ";
+        disasmOuts() << "\nDisassembly of section ";
         if (!SegmentName.empty())
-          outs() << SegmentName << ",";
-        outs() << SectionName << ":\n";
+          disasmOuts() << SegmentName << ",";
+        disasmOuts() << SectionName << ":\n";
       }
 
       bool PrintedLabel = false;
@@ -2019,22 +2023,22 @@ disassembleObject(ObjectFile &Obj, const ObjectFile &DbgObj,
         const StringRef SymbolName = SymNamesHere[i];
 
         if (!PrintedLabel) {
-          outs() << '\n';
+          disasmOuts() << '\n';
           PrintedLabel = true;
         }
         if (LeadingAddr)
-          outs() << format(Is64Bits ? "%016" PRIx64 " " : "%08" PRIx64 " ",
+          disasmOuts() << format(Is64Bits ? "%016" PRIx64 " " : "%08" PRIx64 " ",
                            SectionAddr + Start + VMAAdjustment);
         if (Obj.isXCOFF() && SymbolDescription) {
-          outs() << getXCOFFSymbolDescription(Symbol, SymbolName) << ":\n";
+          disasmOuts() << getXCOFFSymbolDescription(Symbol, SymbolName) << ":\n";
         } else
-          outs() << '<' << SymbolName << ">:\n";
+          disasmOuts() << '<' << SymbolName << ">:\n";
       }
 
       // Don't print raw contents of a virtual section. A virtual section
       // doesn't have any contents in the file.
       if (Section.isVirtual()) {
-        outs() << "...\n";
+        disasmOuts() << "...\n";
         continue;
       }
 
@@ -2071,16 +2075,16 @@ disassembleObject(ObjectFile &Obj, const ObjectFile &DbgObj,
           do {
             StringRef Line;
             std::tie(Line, ErrMsg) = ErrMsg.split('\n');
-            outs() << DT->Context->getAsmInfo()->getCommentString()
+            disasmOuts() << DT->Context->getAsmInfo()->getCommentString()
                    << " error decoding " << SymNamesHere[SHI] << ": " << Line
                    << '\n';
           } while (!ErrMsg.empty());
 
           if (Size) {
-            outs() << DT->Context->getAsmInfo()->getCommentString()
+            disasmOuts() << DT->Context->getAsmInfo()->getCommentString()
                    << " decoding failed region as bytes\n";
             for (uint64_t I = 0; I < Size; ++I)
-              outs() << "\t.byte\t " << format_hex(Bytes[I], 1, /*Upper=*/true)
+              disasmOuts() << "\t.byte\t " << format_hex(Bytes[I], 1, /*Upper=*/true)
                      << '\n';
           }
         }
@@ -2118,7 +2122,7 @@ disassembleObject(ObjectFile &Obj, const ObjectFile &DbgObj,
           Symbols[SI - 1].XCOFFSymInfo.StorageMappingClass &&
           (*Symbols[SI - 1].XCOFFSymInfo.StorageMappingClass == XCOFF::XMC_PR);
 
-      formatted_raw_ostream FOS(outs());
+      formatted_raw_ostream FOS(disasmOuts());
 
       std::unordered_map<uint64_t, std::string> AllLabels;
       std::unordered_map<uint64_t, std::vector<BBAddrMapLabel>> BBAddrMapLabels;
@@ -2473,6 +2477,8 @@ disassembleObject(ObjectFile &Obj, const ObjectFile &DbgObj,
       set_difference(DisasmSymbolSet, FoundDisasmSymbolSet);
   for (StringRef Sym : MissingDisasmSymbolSet.keys())
     reportWarning("failed to disassemble missing symbol " + Sym, FileName);
+
+  QuietDisasm = false;
 }
 
 static void disassembleObject(ObjectFile *Obj, bool InlineRelocs) {
