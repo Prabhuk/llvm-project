@@ -352,8 +352,25 @@ uint32_t objdump::PrefixStrip;
 
 static bool QuietDisasm = false;
 
+// Enumeration of function kinds, and their mapping to function kind values
+// from call graph section (.callgraph).
+// Must stay in sync with enum from llvm/include/llvm/CodeGen/AsmPrinter.h.
+
+enum FunctionKind {
+  // Function cannot be target to indirect calls.
+  NOT_INDIRECT_TARGET = 0,
+  // Function may be target to indirect calls but its type id is unknown.
+  INDIRECT_TARGET_UNKNOWN_TID = 1,
+  // Function may be target to indirect calls and its type id is known.
+  INDIRECT_TARGET_KNOWN_TID = 2,
+
+  // Available in the binary but not listed in the call graph section.
+  NOT_LISTED = -1,
+};
+
 struct FunctionInfo {
   std::string Name;
+  FunctionKind Kind;
   struct DirectCallSite {
     uint64_t CallSite;
     uint64_t Callee;
@@ -2155,6 +2172,8 @@ disassembleObject(ObjectFile &Obj, const ObjectFile &DbgObj,
         auto FuncPc = Symbols[SI].Addr;
         auto FuncName = Symbols[SI].Name.str();
         FuncInfo[FuncPc].Name = FuncName;
+        // Initalize to be later updated while parsing the call graph section.
+        FuncInfo[FuncPc].Kind = NOT_LISTED;
       }
 
       if (DT->InstrAnalysis)
