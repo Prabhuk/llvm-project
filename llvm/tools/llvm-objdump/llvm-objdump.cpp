@@ -3077,6 +3077,24 @@ static void printCallGraphInfo(ObjectFile *Obj) {
   // Get function info through disassembly.
   disassembleObject(Obj, /*InlineRelocs=*/false);
 
+  // Get the .callgraph section.
+  StringRef CallGraphSectionName(".callgraph");
+  std::optional<object::SectionRef> CallGraphSection;
+  for (auto Sec : ToolSectionFilter(*Obj)) {
+    StringRef Name;
+    if (Expected<StringRef> NameOrErr = Sec.getName())
+      Name = *NameOrErr;
+    else
+      consumeError(NameOrErr.takeError());
+
+    if (Name == CallGraphSectionName) {
+      CallGraphSection = Sec;
+      break;
+    }
+  }
+  if (!CallGraphSection)
+    reportWarning("there is no .callgraph section", Obj->getFileName());
+
   // Print function entry to indirect call site addresses mapping from disasm.
   outs() << "\n\nINDIRECT CALL SITES (CALLER_ADDR [CALL_SITE_ADDR,])";
   for (const auto &El : FuncInfo) {
