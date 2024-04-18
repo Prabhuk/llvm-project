@@ -302,6 +302,7 @@ static uint64_t AdjustVMA;
 static bool AllHeaders;
 static std::string ArchName;
 bool objdump::ArchiveHeaders;
+static bool CallGraphInfo;
 bool objdump::Demangle;
 bool objdump::Disassemble;
 bool objdump::DisassembleAll;
@@ -350,6 +351,13 @@ std::string objdump::Prefix;
 uint32_t objdump::PrefixStrip;
 
 static bool QuietDisasm = false;
+
+struct FunctionInfo {
+  std::string Name;
+};
+
+// Map function entry pc to function info.
+MapVector<uint64_t, FunctionInfo> FuncInfo;
 
 DebugVarsFormat objdump::DbgVariables = DVDisabled;
 
@@ -1818,7 +1826,7 @@ disassembleObject(ObjectFile &Obj, const ObjectFile &DbgObj,
   }
 
   for (const SectionRef &Section : ToolSectionFilter(Obj)) {
-    if (FilterSections.empty() && !DisassembleAll &&
+    if (((FilterSections.empty() && !DisassembleAll) || CallGraphInfo) &&
         (!Section.isText() || Section.isVirtual()))
       continue;
 
@@ -2133,6 +2141,12 @@ disassembleObject(ObjectFile &Obj, const ObjectFile &DbgObj,
                                   SectionAddr, Index, End, AllLabels);
         collectBBAddrMapLabels(FullAddrMap, SectionAddr, Index, End,
                                BBAddrMapLabels);
+      }
+
+      if (CallGraphInfo && Symbols[SI].Type == ELF::STT_FUNC) {
+        auto FuncPc = Symbols[SI].Addr;
+        auto FuncName = Symbols[SI].Name.str();
+        FuncInfo[FuncPc].Name = FuncName;
       }
 
       if (DT->InstrAnalysis)
@@ -2478,7 +2492,7 @@ disassembleObject(ObjectFile &Obj, const ObjectFile &DbgObj,
   for (StringRef Sym : MissingDisasmSymbolSet.keys())
     reportWarning("failed to disassemble missing symbol " + Sym, FileName);
 
-  QuietDisasm = false;
+  QuietDisasm = CallGraphInfo;
 }
 
 static void disassembleObject(ObjectFile *Obj, bool InlineRelocs) {
@@ -3005,6 +3019,20 @@ void Dumper::printSymbol(const SymbolRef &Symbol,
   outs() << ' ' << SymName << '\n';
 }
 
+static void printCallGraphInfo(ObjectFile *Obj) {
+  // Get function info through disassembly.
+  disassembleObject(Obj, /*InlineRelocs=*/false);
+
+  // Print function entry pc to function name mapping.
+  outs() << "\n\nFUNCTIONS (FUNC_ENTRY_ADDR, SYM_NAME)";
+  for (const auto &El : FuncInfo) {
+    uint64_t EntryPc = El.first;
+    const auto &Name = El.second.Name;
+    outs() << "\n" << format("%lx", EntryPc) << " " << Name;
+  }
+  outs() << "\n";
+}
+
 static void printUnwindInfo(const ObjectFile *O) {
   outs() << "Unwind info:\n\n";
 
@@ -3279,6 +3307,8 @@ static void dumpObject(ObjectFile *O, const Archive *A = nullptr,
     printRawClangAST(O);
   if (FaultMapSection)
     printFaultMaps(O);
+  if (CallGraphInfo)
+    printCallGraphInfo(O);
   if (Offloading)
     dumpOffloadBinary(*O);
 }
@@ -3445,6 +3475,7 @@ static void parseObjdumpOptions(const llvm::opt::InputArgList &InputArgs) {
   AllHeaders = InputArgs.hasArg(OBJDUMP_all_headers);
   ArchName = InputArgs.getLastArgValue(OBJDUMP_arch_name_EQ).str();
   ArchiveHeaders = InputArgs.hasArg(OBJDUMP_archive_headers);
+  CallGraphInfo = InputArgs.hasArg(OBJDUMP_call_graph_info);
   Demangle = InputArgs.hasArg(OBJDUMP_demangle);
   Disassemble = InputArgs.hasArg(OBJDUMP_disassemble);
   DisassembleAll = InputArgs.hasArg(OBJDUMP_disassemble_all);
@@ -3674,6 +3705,7 @@ int llvm_objdump_main(int argc, char **argv, const llvm::ToolContext &) {
       !DynamicRelocations && !FileHeaders && !PrivateHeaders && !RawClangAST &&
       !Relocations && !SectionHeaders && !SectionContents && !SymbolTable &&
       !DynamicSymbolTable && !UnwindInfo && !FaultMapSection && !Offloading &&
+      !CallGraphInfo &&
       !(MachOOpt &&
         (Bind || DataInCode || ChainedFixups || DyldInfo || DylibId ||
          DylibsUsed || ExportsTrie || FirstPrivateHeader ||
