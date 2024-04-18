@@ -354,6 +354,14 @@ static bool QuietDisasm = false;
 
 struct FunctionInfo {
   std::string Name;
+  struct DirectCallSite {
+    uint64_t CallSite;
+    uint64_t Callee;
+    DirectCallSite(uint64_t CallSite, uint64_t Callee)
+        : CallSite(CallSite), Callee(Callee) {}
+  };
+  SmallVector<DirectCallSite> DirectCallSites;
+  SmallVector<uint64_t> IndirectCallSites;
 };
 
 // Map function entry pc to function info.
@@ -2268,6 +2276,52 @@ disassembleObject(ObjectFile &Obj, const ObjectFile &DbgObj,
           LVP.update({Index, Section.getIndex()},
                      {Index + Size, Section.getIndex()}, Index + Size != End);
 
+          if (CallGraphInfo) {
+            auto MIA = DT->InstrAnalysis.get();
+            if (Disassembled && MIA->isCall(Inst)) {
+              // Call site address is the address of the instruction just
+              // next to the call instruction. This is the return address
+              // as appears on the stack trace.
+              uint64_t CallSitePc = SectionAddr + Index + Size;
+              uint64_t CallerPc = Symbols[SI].Addr;
+              // Check the operands to decide whether this is an direct or
+              // indirect call.
+              // Assumption: a call instruction with at least one register
+              // operand is an indirect call. Otherwise, it is a direct call
+              // with exactly one immediate operand.
+              bool HasRegOperand = false;
+              unsigned int ImmOperandCount = 0;
+              const MCOperand *ImmOperand = NULL;
+              for (unsigned int I = 0; I < Inst.getNumOperands(); I++) {
+                const auto &Operand = Inst.getOperand(I);
+                if (Operand.isReg()) {
+                  HasRegOperand = true;
+                } else if (Operand.isImm()) {
+                  ImmOperandCount++;
+                  ImmOperand = &Operand;
+                }
+              }
+              // Check if the assumption holds true.
+              assert(HasRegOperand ||
+                     (!HasRegOperand && ImmOperandCount == 1) &&
+                         "Call instruction is expected to have at least one "
+                         "register operand (i.e., indirect call) or exactly "
+                         "one immediate operand (i.e., direct call).");
+              if (HasRegOperand) {
+                // Indirect call.
+                FuncInfo[CallerPc].IndirectCallSites.push_back(CallSitePc);
+              } else {
+                // Direct call.
+                uint64_t CalleePc;
+                bool Res = MIA->evaluateBranch(Inst, SectionAddr + Index, Size,
+                                               CalleePc);
+                assert(Res && "Failed to evaluate direct call target address.");
+                FuncInfo[CallerPc].DirectCallSites.emplace_back(CallSitePc,
+                                                                CalleePc);
+              }
+            }
+          }                     
+
           DT->InstPrinter->setCommentStream(CommentStream);
 
           DT->Printer->printInst(
@@ -3022,6 +3076,34 @@ void Dumper::printSymbol(const SymbolRef &Symbol,
 static void printCallGraphInfo(ObjectFile *Obj) {
   // Get function info through disassembly.
   disassembleObject(Obj, /*InlineRelocs=*/false);
+
+  // Print function entry to indirect call site addresses mapping from disasm.
+  outs() << "\n\nINDIRECT CALL SITES (CALLER_ADDR [CALL_SITE_ADDR,])";
+  for (const auto &El : FuncInfo) {
+    auto CallerPc = El.first;
+    auto FuncIndirCallSites = El.second.IndirectCallSites;
+    if (!FuncIndirCallSites.empty()) {
+      outs() << "\n" << format("%lx", CallerPc);
+      for (auto IndirCallSitePc : FuncIndirCallSites)
+        outs() << " " << format("%lx", IndirCallSitePc);
+    }
+  }
+
+  // Print function entry to direct call site and target function entry
+  // addresses mapping from disasm.
+  outs()
+      << "\n\nDIRECT CALL SITES (CALLER_ADDR [(CALL_SITE_ADDR, TARGET_ADDR),])";
+  for (const auto &El : FuncInfo) {
+    auto CallerPc = El.first;
+    auto FuncDirCallSites = El.second.DirectCallSites;
+    if (!FuncDirCallSites.empty()) {
+      outs() << "\n" << format("%lx", CallerPc);
+      for (const FunctionInfo::DirectCallSite &DCS : FuncDirCallSites) {
+        outs() << " " << format("%lx", DCS.CallSite) << " "
+               << format("%lx", DCS.Callee);
+      }
+    }
+  }
 
   // Print function entry pc to function name mapping.
   outs() << "\n\nFUNCTIONS (FUNC_ENTRY_ADDR, SYM_NAME)";
