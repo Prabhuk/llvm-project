@@ -4,6 +4,9 @@ class F<string name, string help> : Flag<["-"], name>, HelpText<help>;
 class FF<string name, string help>: Flag<["--"], name>, HelpText<help>;
 class S<string name, string meta, string help>: Separate<["--"], name>, HelpText<help>, MetaVarName<meta>;
 
+def test_sub_command : SubCommand<"testSubCommand", "Tests subcommand class with no dash or doubledashes">;
+def test_sub_command_flag_option : Flag<["-"], "testscflag">;
+
 def help : FF<"help", "Display available options">;
 def : F<"h", "Alias for --help">, Alias<help>;
 
