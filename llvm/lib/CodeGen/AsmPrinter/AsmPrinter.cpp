@@ -2054,16 +2054,18 @@ void AsmPrinter::emitFunctionBody() {
         // Only indirect calls have type identifiers set.
         const auto &CallSiteInfo = CallSitesInfoMap.find(&MI);
         if (CallSiteInfo != CallSitesInfoMap.end()) {
-          if (auto *TypeId = CallSiteInfo->second.CalleeTypeId) {
-            // Emit label.
-            MCSymbol *S = MF->getContext().createTempSymbol();
-            OutStreamer->emitLabel(S);
+          if (!CallSiteInfo->second.CalleeTypeIds.empty()) {
+            for (auto *CalleeTypeId : CallSiteInfo->second.CalleeTypeIds) {
+              // Emit label.
+              MCSymbol *S = MF->getContext().createTempSymbol();
+              OutStreamer->emitLabel(S);
 
-            // Get type id value.
-            uint64_t TypeIdVal = TypeId->getZExtValue();
+              // Get callee_type id value.
+              uint64_t CalleeTypeIdVal = CalleeTypeId->getZExtValue();
 
-            // Add to function's callsite labels.
-            FuncInfo.CallSiteLabels.emplace_back(TypeIdVal, S);
+              // Add to function's callsite labels.
+              FuncInfo.CallSiteLabels.emplace_back(CalleeTypeIdVal, S);
+            }
           }
         }
       }

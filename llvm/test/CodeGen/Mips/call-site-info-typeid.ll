@@ -1,8 +1,8 @@
-;; Tests that call site type ids can be extracted and set from type operand
-;; bundles.
+;; Tests that call site callee type ids can be extracted and set from
+;; callee_type metadata.
 
 ;; Verify the exact calleeTypeId value to ensure it is not garbage but the value
-;; computed as the type id from the callee_type operand bundle.
+;; computed as the type id from the callee_type metadata.
 ; RUN: llc --call-graph-section -mtriple=mips-linux-gnu < %s -stop-before=finalize-isel -o - | FileCheck %s
 
 declare !type !0 void @foo(i8 signext %a)

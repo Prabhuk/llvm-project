@@ -38,15 +38,18 @@ class Base {
       auto FpBaseVf = &Base::vf;
       auto FpDerivedVf = &Derived::vf;
     
-      // CST: call noundef i32 %{{.*}} [ "callee_type"(metadata !"_ZTSFiPvE.generalized") ]
+      // CST: call noundef i32 %{{.*}}, !callee_type [[F_TVF_CT:![0-9]+]]
       (Bptr->*FpBaseVf)(0);
     
-      // CST: call noundef i32 %{{.*}} [ "callee_type"(metadata !"_ZTSFiPvE.generalized") ]
+      // CST: call noundef i32 %{{.*}}, !callee_type [[F_TVF_CT:![0-9]+]]
       (BptrToD->*FpBaseVf)(0);
     
-      // CST: call noundef i32 %{{.*}} [ "callee_type"(metadata !"_ZTSFiPvE.generalized") ]
+      // CST: call noundef i32 %{{.*}}, !callee_type [[F_TVF_CT:![0-9]+]]
       (Dptr->*FpBaseVf)(0);
     
-      // CST: call noundef i32 %{{.*}} [ "callee_type"(metadata !"_ZTSFiPvE.generalized") ]
+      // CST: call noundef i32 %{{.*}}, !callee_type [[F_TVF_CT:![0-9]+]]
       (Dptr->*FpDerivedVf)(0);
     }
+
+    // CST-DAG: [[F_TVF_CT]] = !{[[F_TVF:![0-9]+]]}
+    // CST-DAG: [[F_TVF]] = !{i64 0, !"_ZTSFiPvE.generalized"}
