@@ -2360,7 +2360,7 @@ disassembleObject(ObjectFile &Obj, const ObjectFile &DbgObj,
               // next to the call instruction. This is the return address
               // as appears on the stack trace.
               uint64_t CallSitePc = SectionAddr + Index + Size;
-              uint64_t CallerPc = Symbols[SI].Addr;
+              uint64_t CallerPc = SectionAddr + Start + VMAAdjustment;
               // Check the operands to decide whether this is an direct or
               // indirect call.
               // Assumption: a call instruction with at least one register
@@ -2368,22 +2368,20 @@ disassembleObject(ObjectFile &Obj, const ObjectFile &DbgObj,
               // with exactly one immediate operand.
               bool HasRegOperand = false;
               unsigned int ImmOperandCount = 0;
-              const MCOperand *ImmOperand = NULL;
               for (unsigned int I = 0; I < Inst.getNumOperands(); I++) {
                 const auto &Operand = Inst.getOperand(I);
                 if (Operand.isReg()) {
                   HasRegOperand = true;
                 } else if (Operand.isImm()) {
                   ImmOperandCount++;
-                  ImmOperand = &Operand;
                 }
               }
               // Check if the assumption holds true.
               assert(HasRegOperand ||
-                     (!HasRegOperand && ImmOperandCount == 1) &&
-                         "Call instruction is expected to have at least one "
-                         "register operand (i.e., indirect call) or exactly "
-                         "one immediate operand (i.e., direct call).");
+                    (!HasRegOperand && ImmOperandCount == 1) &&
+                        "Call instruction is expected to have at least one "
+                        "register operand (i.e., indirect call) or exactly "
+                        "one immediate operand (i.e., direct call).");
               if (HasRegOperand) {
                 // Indirect call.
                 IndirectCallSites.insert(CallSitePc);
@@ -2392,11 +2390,19 @@ disassembleObject(ObjectFile &Obj, const ObjectFile &DbgObj,
                 // Direct call.
                 uint64_t CalleePc;
                 bool Res = MIA->evaluateBranch(Inst, SectionAddr + Index, Size,
-                                               CalleePc);
+                                              CalleePc);
                 assert(Res && "Failed to evaluate direct call target address.");
                 FuncInfo[CallerPc].DirectCallSites.emplace_back(CallSitePc,
                                                                 CalleePc);
               }
+
+              if(FuncInfo[CallerPc].Name.empty()) {
+                for (size_t Index = 0; Index < SymbolsHere.size(); ++Index) {
+                  if (SymbolsHere[Index].Addr == CallerPc) {
+                    FuncInfo[CallerPc].Name = SymNamesHere[Index];
+                  }
+                }                  
+              }              
             }
           }                     
 
