@@ -357,16 +357,17 @@ static bool QuietDisasm = false;
 // from call graph section (.callgraph).
 // Must stay in sync with enum from llvm/include/llvm/CodeGen/AsmPrinter.h.
 
-enum FunctionKind {
-  // Function cannot be target to indirect calls.
+enum FunctionKind : uint64_t {
+  /// Function cannot be target to indirect calls.
   NOT_INDIRECT_TARGET = 0,
-  // Function may be target to indirect calls but its type id is unknown.
+
+  /// Function may be target to indirect calls but its type id is unknown.
   INDIRECT_TARGET_UNKNOWN_TID = 1,
-  // Function may be target to indirect calls and its type id is known.
+
+  /// Function may be target to indirect calls and its type id is known.
   INDIRECT_TARGET_KNOWN_TID = 2,
 
-  // Available in the binary but not listed in the call graph section.
-  NOT_LISTED = -1,
+  NOT_LISTED = 3,
 };
 
 struct FunctionInfo {
@@ -2388,7 +2389,7 @@ disassembleObject(ObjectFile &Obj, const ObjectFile &DbgObj,
               // next to the call instruction. This is the return address
               // as appears on the stack trace.
               uint64_t CallSitePc = SectionAddr + Index + Size;
-              uint64_t CallerPc = Symbols[SI].Addr;
+              uint64_t CallerPc = SectionAddr + Start + VMAAdjustment;
               // Check the operands to decide whether this is an direct or
               // indirect call.
               // Assumption: a call instruction with at least one register
@@ -2396,14 +2397,12 @@ disassembleObject(ObjectFile &Obj, const ObjectFile &DbgObj,
               // with exactly one immediate operand.
               bool HasRegOperand = false;
               unsigned int ImmOperandCount = 0;
-              const MCOperand *ImmOperand = NULL;
               for (unsigned int I = 0; I < Inst.getNumOperands(); I++) {
                 const auto &Operand = Inst.getOperand(I);
                 if (Operand.isReg()) {
                   HasRegOperand = true;
                 } else if (Operand.isImm()) {
                   ImmOperandCount++;
-                  ImmOperand = &Operand;
                 }
               }
               // Check if the assumption holds true.
@@ -2424,6 +2423,14 @@ disassembleObject(ObjectFile &Obj, const ObjectFile &DbgObj,
                 assert(Res && "Failed to evaluate direct call target address.");
                 FuncInfo[CallerPc].DirectCallSites.emplace_back(CallSitePc,
                                                                 CalleePc);
+              }
+
+              if (FuncInfo[CallerPc].Name.empty()) {
+                for (size_t Index = 0; Index < SymbolsHere.size(); ++Index) {
+                  if (SymbolsHere[Index].Addr == CallerPc) {
+                    FuncInfo[CallerPc].Name = SymNamesHere[Index];
+                  }
+                }
               }
             }
           }                     
@@ -2837,9 +2844,9 @@ void Dumper::printRelocations() {
                 getRelocationValueString(Reloc, SymbolDescription, ValueStr))
           reportUniqueWarning(std::move(E));
 
-        outs() << format(Fmt.data(), Address) << " "
-               << left_justify(RelocName, TypePadding) << " " << ValueStr
-               << "\n";
+        disasmOuts() << format(Fmt.data(), Address) << " "
+                     << left_justify(RelocName, TypePadding) << " " << ValueStr
+                     << "\n";
       }
     }
   }
@@ -2923,15 +2930,15 @@ void objdump::printSectionContents(const ObjectFile *Obj) {
     if (!Size)
       continue;
 
-    outs() << "Contents of section ";
+    disasmOuts() << "Contents of section ";
     StringRef SegmentName = getSegmentName(MachO, Section);
     if (!SegmentName.empty())
-      outs() << SegmentName << ",";
-    outs() << Name << ":\n";
+      disasmOuts() << SegmentName << ",";
+    disasmOuts() << Name << ":\n";
     if (Section.isBSS()) {
-      outs() << format("<skipping contents of bss section at [%04" PRIx64
-                       ", %04" PRIx64 ")>\n",
-                       BaseAddr, BaseAddr + Size);
+      disasmOuts() << format("<skipping contents of bss section at [%04" PRIx64
+                             ", %04" PRIx64 ")>\n",
+                             BaseAddr, BaseAddr + Size);
       continue;
     }
 
@@ -2939,26 +2946,26 @@ void objdump::printSectionContents(const ObjectFile *Obj) {
 
     // Dump out the content as hex and printable ascii characters.
     for (std::size_t Addr = 0, End = Contents.size(); Addr < End; Addr += 16) {
-      outs() << format(" %04" PRIx64 " ", BaseAddr + Addr);
+      disasmOuts() << format(" %04" PRIx64 " ", BaseAddr + Addr);
       // Dump line of hex.
       for (std::size_t I = 0; I < 16; ++I) {
         if (I != 0 && I % 4 == 0)
-          outs() << ' ';
+          disasmOuts() << ' ';
         if (Addr + I < End)
-          outs() << hexdigit((Contents[Addr + I] >> 4) & 0xF, true)
-                 << hexdigit(Contents[Addr + I] & 0xF, true);
+          disasmOuts() << hexdigit((Contents[Addr + I] >> 4) & 0xF, true)
+                       << hexdigit(Contents[Addr + I] & 0xF, true);
         else
-          outs() << "  ";
+          disasmOuts() << "  ";
       }
       // Print ascii.
-      outs() << "  ";
+      disasmOuts() << "  ";
       for (std::size_t I = 0; I < 16 && Addr + I < End; ++I) {
         if (isPrint(static_cast<unsigned char>(Contents[Addr + I]) & 0xFF))
-          outs() << Contents[Addr + I];
+          disasmOuts() << Contents[Addr + I];
         else
-          outs() << ".";
+          disasmOuts() << ".";
       }
-      outs() << "\n";
+      disasmOuts() << "\n";
     }
   }
 }
@@ -3247,9 +3254,12 @@ static void printCallGraphInfo(ObjectFile *Obj) {
 
       // Function entry pc.
       uint64_t FuncEntryPc = CGNext();
-      if (!FuncInfo.count(FuncEntryPc))
+      outs() << "FuncEntryPc::[ " << FuncEntryPc << " ]\n";
+      if (!FuncInfo.count(FuncEntryPc)) {
+        outs() << "***************************************** malformed 3333 \n";
         reportError(Obj->getFileName(),
                     "Invalid function entry pc in .callgraph section.");
+      }
 
       // Function kind.
       uint64_t Kind = CGNext();
