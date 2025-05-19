@@ -1705,10 +1705,11 @@ void AsmPrinter::emitCallGraphSection(const MachineFunction &MF,
       OutStreamer->emitInt64(static_cast<uint64_t>(
           FunctionInfo::FunctionKind::INDIRECT_TARGET_KNOWN_TID));
       OutStreamer->emitInt64(TypeId->getZExtValue());
-    } else {
-      OutStreamer->emitInt64(static_cast<uint64_t>(
-          FunctionInfo::FunctionKind::INDIRECT_TARGET_UNKNOWN_TID));
-    }
+    } 
+    // else {
+    //   OutStreamer->emitInt64(static_cast<uint64_t>(
+    //       FunctionInfo::FunctionKind::INDIRECT_TARGET_UNKNOWN_TID));
+    // }
   }
 
   // Emit callsite labels, where each element is a pair of type id and

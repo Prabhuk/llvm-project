@@ -28,6 +28,7 @@
 #include "llvm/ADT/SetOperations.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/Twine.h"
+#include "llvm/BinaryFormat/ELF.h"
 #include "llvm/BinaryFormat/Wasm.h"
 #include "llvm/DebugInfo/BTF/BTFParser.h"
 #include "llvm/DebugInfo/DWARF/DWARFContext.h"
@@ -38,6 +39,7 @@
 #include "llvm/Demangle/Demangle.h"
 #include "llvm/MC/MCAsmInfo.h"
 #include "llvm/MC/MCContext.h"
+#include "llvm/MC/MCDisassembler/MCDisassembler.h"
 #include "llvm/MC/MCDisassembler/MCRelocationInfo.h"
 #include "llvm/MC/MCInst.h"
 #include "llvm/MC/MCInstPrinter.h"
@@ -55,6 +57,7 @@
 #include "llvm/Object/FaultMapParser.h"
 #include "llvm/Object/MachO.h"
 #include "llvm/Object/MachOUniversal.h"
+#include "llvm/Object/ObjectFile.h"
 #include "llvm/Object/OffloadBinary.h"
 #include "llvm/Object/Wasm.h"
 #include "llvm/Option/Arg.h"
@@ -1413,6 +1416,8 @@ static uint64_t dumpARMELFData(uint64_t SectionAddr, uint64_t Index,
   return 1;
 }
 
+static raw_ostream &disasmOuts() { return QuietDisasm ? nulls() : outs(); }
+
 static void dumpELFData(uint64_t SectionAddr, uint64_t Index, uint64_t End,
                         ArrayRef<uint8_t> Bytes) {
   // print out data up to 8 bytes at a time in hex and ascii
@@ -1422,9 +1427,9 @@ static void dumpELFData(uint64_t SectionAddr, uint64_t Index, uint64_t End,
 
   for (; Index < End; ++Index) {
     if (NumBytes == 0)
-      outs() << format("%8" PRIx64 ":", SectionAddr + Index);
+      disasmOuts() << format("%8" PRIx64 ":", SectionAddr + Index);
     Byte = Bytes.slice(Index)[0];
-    outs() << format(" %02x", Byte);
+    disasmOuts() << format(" %02x", Byte);
     AsciiData[NumBytes] = isPrint(Byte) ? Byte : '.';
 
     uint8_t IndentOffset = 0;
@@ -1439,9 +1444,9 @@ static void dumpELFData(uint64_t SectionAddr, uint64_t Index, uint64_t End,
     }
     if (NumBytes == 8) {
       AsciiData[8] = '\0';
-      outs() << std::string(IndentOffset, ' ') << "         ";
-      outs() << reinterpret_cast<char *>(AsciiData);
-      outs() << '\n';
+      disasmOuts() << std::string(IndentOffset, ' ') << "         ";
+      disasmOuts() << reinterpret_cast<char *>(AsciiData);
+      disasmOuts() << '\n';
       NumBytes = 0;
     }
   }
@@ -1474,6 +1479,18 @@ SymbolInfoTy objdump::createSymbolInfo(const ObjectFile &Obj,
   } else {
     uint8_t Type =
         Obj.isELF() ? getElfSymbolType(Obj, Symbol) : (uint8_t)ELF::STT_NOTYPE;
+    // if(Addr == 0x201af8) {
+    //   Expected<std::unique_ptr<Dumper>> DumperOrErr = createDumper(Obj);
+    //   if (!DumperOrErr) {
+    //     reportError(DumperOrErr.takeError(), Obj.getFileName(), "");        
+    //   } else {
+    //     Dumper &D = **DumperOrErr;
+    //     QuietDisasm = false;
+    //     StringRef ArchiveName(""), ArchitectureName("");
+    //     D.printSymbol(Symbol, {}, FileName, ArchiveName, ArchitectureName, false);
+    //     QuietDisasm = true;
+    //   }
+    // }                        
     return SymbolInfoTy(Addr, Name, Type, IsMappingSymbol);
   }
 }
@@ -1697,8 +1714,6 @@ fetchBinaryByBuildID(const ObjectFile &Obj) {
   }
   return std::move(*DebugBinary);
 }
-
-static raw_ostream &disasmOuts() { return QuietDisasm ? nulls() : outs(); }
 
 static void
 disassembleObject(ObjectFile &Obj, const ObjectFile &DbgObj,
@@ -2152,6 +2167,14 @@ disassembleObject(ObjectFile &Obj, const ObjectFile &DbgObj,
           disasmOuts() << getXCOFFSymbolDescription(Symbol, SymbolName) << ":\n";
         } else
           disasmOuts() << '<' << SymbolName << ">:\n";
+        
+        // Collect function info necessary to parse .callgraph section.
+        if (Obj.isELF() && CallGraphInfo && SymbolsHere[i].Type == ELF::STT_FUNC) {
+          auto FuncPc = SectionAddr + Start + VMAAdjustment;
+          FuncInfo[FuncPc].Name = SymbolName;
+          // Initalize to be later updated while parsing the call graph section.
+          FuncInfo[FuncPc].Kind = NOT_LISTED;
+        }
       }
 
       // Don't print raw contents of a virtual section. A virtual section
@@ -2253,14 +2276,25 @@ disassembleObject(ObjectFile &Obj, const ObjectFile &DbgObj,
         collectBBAddrMapLabels(FullAddrMap, SectionAddr, Index, End,
                                BBAddrMapLabels);
       }
-
-      if (CallGraphInfo && Symbols[SI].Type == ELF::STT_FUNC) {
-        auto FuncPc = Symbols[SI].Addr;
-        auto FuncName = Symbols[SI].Name.str();
-        FuncInfo[FuncPc].Name = FuncName;
-        // Initalize to be later updated while parsing the call graph section.
-        FuncInfo[FuncPc].Kind = NOT_LISTED;
-      }
+      
+      // if (CallGraphInfo) {
+      //   if(Symbols[SI].Addr == 0x201af8) {
+      //     outs() << "Found function at 201af8 later" << Symbols[SI].Name.str() << " \n";
+      //     outs() << "Type " << Symbols[SI].Type << "\n";
+      //   }
+      //   if (Symbols[SI].Type == ELF::STT_FUNC || Symbols[SI].Type == ELF::STT_NOTYPE) {
+      //     auto FuncPc = Symbols[SI].Addr;
+      //     auto FuncName = Symbols[SI].Name.str();
+      //     FuncInfo[FuncPc].Name = FuncName;
+      //     // Initalize to be later updated while parsing the call graph section.
+      //     FuncInfo[FuncPc].Kind = NOT_LISTED;
+      //   }
+      //   if(Symbols[SI].Type == ELF::STT_NOTYPE) {
+      //     if(Symbols[SI].Name.str().find("AudioStreamContextValueToString") != std::string::npos) {
+      //      outs() << "Found AudioStreamContextValueToString " << Symbols[SI].Name.str() << " \n";
+      //     }
+      //   }
+      // }
 
       if (DT->InstrAnalysis)
         DT->InstrAnalysis->resetState();
@@ -2815,10 +2849,10 @@ void Dumper::printRelocations() {
 
   for (std::pair<SectionRef, std::vector<SectionRef>> &P : SecToRelSec) {
     StringRef SecName = unwrapOrError(P.first.getName(), O.getFileName());
-    outs() << "\nRELOCATION RECORDS FOR [" << SecName << "]:\n";
+    disasmOuts() << "\nRELOCATION RECORDS FOR [" << SecName << "]:\n";
     uint32_t OffsetPadding = (O.getBytesInAddress() > 4 ? 16 : 8);
     uint32_t TypePadding = 24;
-    outs() << left_justify("OFFSET", OffsetPadding) << " "
+    disasmOuts() << left_justify("OFFSET", OffsetPadding) << " "
            << left_justify("TYPE", TypePadding) << " "
            << "VALUE\n";
 
@@ -3198,6 +3232,7 @@ void Dumper::printSymbol(const SymbolRef &Symbol,
 
 static void printCallGraphInfo(ObjectFile *Obj) {
   // Get function info through disassembly.
+  QuietDisasm = true;
   disassembleObject(Obj, /*InlineRelocs=*/false);
 
   // Get the .callgraph section.
@@ -3230,49 +3265,63 @@ static void printCallGraphInfo(ObjectFile *Obj) {
     StringRef CGSecContents = unwrapOrError(
         CallGraphSection.value().getContents(), Obj->getFileName());
     // TODO: some entries are written in pointer size. are they always 64-bit?
-    if (CGSecContents.size() % sizeof(uint64_t))
-      reportError(Obj->getFileName(), "Malformed .callgraph section.");
+    if (CGSecContents.size() % sizeof(uint8_t))
+      reportError(Obj->getFileName(), "Malformed .callgraph section. Not modulo 8.");
 
-    size_t Size = CGSecContents.size() / sizeof(uint64_t);
-    auto *It = reinterpret_cast<const uint64_t *>(CGSecContents.data());
+    size_t Size = CGSecContents.size() / sizeof(uint8_t);
+    auto *It = reinterpret_cast<const uint8_t *>(CGSecContents.data());    
     const auto *const End = It + Size;
 
-    auto CGHasNext = [&]() { return It < End; };
-    auto CGNext = [&]() -> uint64_t {
-      if (!CGHasNext())
-        reportError(Obj->getFileName(), "Malformed .callgraph section.");
-      return *It++;
+    auto HasMoreBytes = [&]() -> bool {
+      return It < End;
+    };    
+
+    auto CGNextUint32 = [&]() -> uint32_t {
+      if(It + 4 > End)
+        reportError(Obj->getFileName(), "Malformed .callgraph section. Can't get next uint32");
+      uint32_t RetVal;
+      std::memcpy(&RetVal, It, 4);
+      It += 4;
+      return RetVal;
     };
 
+    auto CGNextUint64 = [&]() -> uint64_t {
+      if(It + 8 > End)
+        reportError(Obj->getFileName(), "Malformed .callgraph section. Can't get next uint64");
+      uint64_t RetVal;
+      std::memcpy(&RetVal, It, 8);
+      It += 8;
+      return RetVal;
+    };
+    
     // Parse the content
-    while (CGHasNext()) {
+    while (HasMoreBytes()) {
       // Format version number.
-      uint64_t FormatVersionNumber = CGNext();
+      uint64_t FormatVersionNumber = CGNextUint64();
       if (FormatVersionNumber != 0)
         reportError(Obj->getFileName(),
                     "Unknown format version in .callgraph section.");
 
       // Function entry pc.
-      uint64_t FuncEntryPc = CGNext();
-      outs() << "FuncEntryPc::[ " << FuncEntryPc << " ]\n";
-      if (!FuncInfo.count(FuncEntryPc)) {
-        outs() << "***************************************** malformed 3333 \n";
+      // FIXME: Modify the llvm code to always emit 64 bits even if the pointer size is 32 bits.
+      uint64_t FuncEntryPc = static_cast<uint64_t>(CGNextUint32());
+      if (!FuncInfo.count(FuncEntryPc))
         reportError(Obj->getFileName(),
                     "Invalid function entry pc in .callgraph section.");
-      }
 
       // Function kind.
-      uint64_t Kind = CGNext();
+      uint64_t Kind = CGNextUint64();
       switch (Kind) {
       case 0: // not an indirect target
         FuncInfo[FuncEntryPc].Kind = NOT_INDIRECT_TARGET;
         break;
       case 1: // indirect target with unknown type id
+        outs() << "Hitting the INDIRECT_TARGET_UNKNOWN_TID case******************************* " << format("%8" PRIx64 ":", FuncEntryPc) << "  \n";
         FuncInfo[FuncEntryPc].Kind = INDIRECT_TARGET_UNKNOWN_TID;
         break;
-      case 2: // indirect target with known type id
+      case 2: // indirect target with known type id        
         FuncInfo[FuncEntryPc].Kind = INDIRECT_TARGET_KNOWN_TID;
-        TypeIdToIndirTargets[CGNext()].push_back(FuncEntryPc);
+        TypeIdToIndirTargets[CGNextUint64()].push_back(FuncEntryPc);
         break;
       default:
         reportError(Obj->getFileName(),
@@ -3280,10 +3329,10 @@ static void printCallGraphInfo(ObjectFile *Obj) {
       }
 
       // Read call sites.
-      uint64_t CallSiteCount = CGNext();
+      uint64_t CallSiteCount = CGNextUint64();
       for (unsigned long I = 0; I < CallSiteCount; I++) {
-        uint64_t TypeId = CGNext();
-        uint64_t CallSitePc = CGNext();
+        uint64_t TypeId = CGNextUint64();
+        uint64_t CallSitePc = static_cast<uint64_t>(CGNextUint32());
         if (IndirectCallSites.count(CallSitePc)) {
           TypeIdToIndirCallSites[TypeId].push_back(CallSitePc);
           ICallWithTypeIdCount++;
