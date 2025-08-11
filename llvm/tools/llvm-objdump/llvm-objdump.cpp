@@ -2456,8 +2456,8 @@ disassembleObject(ObjectFile &Obj, const ObjectFile &DbgObj,
                 bool Res = MIA->evaluateBranch(Inst, SectionAddr + Index, Size,
                                                CalleePc);
                 assert(Res && "Failed to evaluate direct call target address.");
-                FuncInfo[CallerPc].DirectCallSites.emplace_back(CallSitePc,
-                                                                CalleePc);
+                // FuncInfo[CallerPc].DirectCallSites.emplace_back(CallSitePc,
+                //                                                 CalleePc);
               }
 
               if (FuncInfo[CallerPc].Name.empty()) {
@@ -3263,7 +3263,7 @@ static void printCallGraphInfo(ObjectFile *Obj) {
         CallGraphSection.value().getContents(), Obj->getFileName());
     // TODO: some entries are written in pointer size. are they always 64-bit?
     if (CGSecContents.size() % sizeof(uint64_t))
-      reportError(Obj->getFileName(), "Malformed .callgraph section.");
+      reportError(Obj->getFileName(), "Malformed .callgraph section 1.");
 
     size_t Size = CGSecContents.size() / sizeof(uint64_t);
     auto *It = reinterpret_cast<const uint64_t *>(CGSecContents.data());
@@ -3272,25 +3272,28 @@ static void printCallGraphInfo(ObjectFile *Obj) {
     auto CGHasNext = [&]() { return It < End; };
     auto CGNext = [&]() -> uint64_t {
       if (!CGHasNext())
-        reportError(Obj->getFileName(), "Malformed .callgraph section.");
+        reportError(Obj->getFileName(), "Malformed .callgraph section 2.");
       return *It++;
     };
 
     // Parse the content
     while (CGHasNext()) {
       // Format version number.
+      llvm::outs() << "From 1 \n";
       uint64_t FormatVersionNumber = CGNext();
       if (FormatVersionNumber != 0)
         reportError(Obj->getFileName(),
                     "Unknown format version in .callgraph section.");
 
       // Function entry pc.
+      llvm::outs() << "From 2 \n";
       uint64_t FuncEntryPc = CGNext();
       if (!FuncInfo.count(FuncEntryPc))
         reportError(Obj->getFileName(),
                     "Invalid function entry pc in .callgraph section.");
 
       // Function kind.
+      llvm::outs() << "From 3 \n";
       uint64_t Kind = CGNext();
       switch (Kind) {
       case 0: // not an indirect target
@@ -3301,6 +3304,7 @@ static void printCallGraphInfo(ObjectFile *Obj) {
         break;
       case 2: // indirect target with known type id
         FuncInfo[FuncEntryPc].Kind = FunctionKind::INDIRECT_TARGET_KNOWN_TID;
+        llvm::outs() << "From 4 \n";
         TypeIdToIndirTargets[CGNext()].push_back(FuncEntryPc);
         break;
       default:
@@ -3309,9 +3313,12 @@ static void printCallGraphInfo(ObjectFile *Obj) {
       }
 
       // Read call sites.
+      llvm::outs() << "From 5 \n";
       uint64_t CallSiteCount = CGNext();
       for (unsigned long I = 0; I < CallSiteCount; I++) {
+        llvm::outs() << "From 6 \n";
         uint64_t TypeId = CGNext();
+        llvm::outs() << "From 7 \n";
         uint64_t CallSitePc = CGNext();
         if (IndirectCallSites.count(CallSitePc)) {
           TypeIdToIndirCallSites[TypeId].push_back(CallSitePc);
@@ -3323,6 +3330,21 @@ static void printCallGraphInfo(ObjectFile *Obj) {
           // entries here may also be discarded.
           IgnoredICallIdCount++;
         }
+      }
+
+      // Read call sites.
+      llvm::outs() << "From 8 \n";
+      uint64_t DirectCallSiteCount = CGNext();
+      llvm::outs() << "DirectCallSiteCount ::  " << DirectCallSiteCount << "\n";
+      for (unsigned long I = 0; I < DirectCallSiteCount; I++) {
+        llvm::outs() << "From 9 \n";
+        uint64_t CallSitePc = CGNext();
+        llvm::outs() << "CallSitePc ::  " << CallSitePc << "\n";
+        llvm::outs() << "From 10 \n";
+        uint64_t CalleePc = CGNext();
+        llvm::outs() << "CalleePc ::  " << CalleePc << "\n";
+        FuncInfo[FuncEntryPc].DirectCallSites.emplace_back(CallSitePc,
+                                                           CalleePc);
       }
     }
 
