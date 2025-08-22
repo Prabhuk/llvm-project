@@ -2092,13 +2092,8 @@ void AsmPrinter::emitFunctionBody() {
         break;
       }
 
-      if (TM.Options.EmitCallGraphSection && MI.isCall()) {
-        llvm::outs() << "Dump MI for calls \n";
-        MI.dump();
-        llvm::outs() << "CallSitesInfoMap.size() " << CallSitesInfoMap.size()
-                     << "\n";
+      if (TM.Options.EmitCallGraphSection && MI.isCall())
         emitIndirectCalleeLabels(FuncInfo, CallSitesInfoMap, MI);
-      }
 
       // If there is a post-instruction symbol, emit a label for it here.
       if (MCSymbol *S = MI.getPostInstrSymbol())

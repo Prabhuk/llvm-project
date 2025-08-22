@@ -3220,6 +3220,7 @@ static void printCallGraphInfo(ObjectFile *Obj) {
                     "Unknown format version in .callgraph section.");
       // Function entry pc.
       uint64_t FuncEntryPc = CGNext();
+      // TODO(prabhukr): Check if this is a valid Function Entry PC by referring to the symbol table.
       // Function kind.
       uint64_t Kind = CGNext();
       switch (Kind) {

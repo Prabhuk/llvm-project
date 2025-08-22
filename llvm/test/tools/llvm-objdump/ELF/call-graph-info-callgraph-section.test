@@ -6,7 +6,7 @@
 # CHECK: [[FILE]]: file format elf64-x86-64
 
 # CHECK: INDIRECT TARGET TYPES (TYPEID [FUNC_ADDR,])
-# CHECK-NEXT: UNKNOWN 6 b
+# CHECK-NEXT: UNKNOWN 6
 # CHECK-NEXT: 20 a
 # CHECK-EMPTY:
 # CHECK-NEXT: INDIRECT CALL TYPES (TYPEID [CALL_SITE_ADDR,])
@@ -17,12 +17,6 @@
 # CHECK-EMPTY:
 # CHECK-NEXT: DIRECT CALL SITES (CALLER_ADDR [(CALL_SITE_ADDR, TARGET_ADDR),])
 # CHECK-NEXT: 0 5 5
-# CHECK-EMPTY:
-# CHECK-NEXT: FUNCTIONS (FUNC_ENTRY_ADDR, SYM_NAME)
-# CHECK-NEXT: 0 foo
-# CHECK-NEXT: 6 bar
-# CHECK-NEXT: a baz
-# CHECK-NEXT: b qux
 
 .text
 
@@ -54,6 +48,9 @@ qux:                  #< qux is at 11 (b).
 .quad	0       #< foo()'s entry address.
 .quad	0       #< Function kind: not an indirect target.
 .quad	0       #< Count of indirect call sites that follow: 0.
+.quad	1       #< Count of direct call sites that follow: 1.
+.quad 5      #< Direct call site.
+.quad 5       #< Direct callee.
 
 .quad	0       #< Format version number.
 .quad	6       #< bar()'s entry address.
@@ -61,13 +58,16 @@ qux:                  #< qux is at 11 (b).
 .quad	1       #< Count of indirect call sites that follow: 1.
 .quad 16      #< Indirect call type id.
 .quad 9       #< Indirect call site.
+.quad	0       #< Count of direct call sites that follow: 0.
 
 .quad	0       #< Format version number.
 .quad	10      #< baz()'s entry address.
 .quad	2       #< Function kind: indirect target with known type id.
 .quad 32      #< Indirect target type id.
 .quad	0       #< Count of indirect call sites that follow: 1.
+.quad	0       #< Count of direct call sites that follow: 0.
 
 # No call graph section entry for qux: will be printed as unknown target.
+# TODO(prabhuk): In the new non-disassembly implementation we are not handling functions without callgraph entries. Should do that when we move to readelf.
 
 .text
