@@ -2093,10 +2093,6 @@ void AsmPrinter::emitFunctionBody() {
       }
 
       if (TM.Options.EmitCallGraphSection && MI.isCall()) {
-        llvm::outs() << "Dump MI for calls \n";
-        MI.dump();
-        llvm::outs() << "CallSitesInfoMap.size() " << CallSitesInfoMap.size()
-                     << "\n";
         emitIndirectCalleeLabels(FuncInfo, CallSitesInfoMap, MI);
       }
 
