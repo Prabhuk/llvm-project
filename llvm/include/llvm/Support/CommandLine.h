@@ -40,6 +40,178 @@
 #include <type_traits>
 #include <vector>
 
+#include <cxxabi.h>
+
+namespace internal {
+
+struct Option {
+  std::string name;
+  llvm::StringRef desc;
+  std::string type;
+  bool alias = false;
+  std::string aliasFor;
+
+  std::string optName;
+  std::string configName;
+};
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wglobal-constructors"
+static inline std::vector<internal::Option> options;
+#pragma clang diagnostic pop
+
+static std::string generateCPPName(llvm::StringRef s) {
+  bool needsCaps = true;
+  std::string ret;
+  for (char c : s) {
+    if (c == '-') {
+      needsCaps = true;
+      continue;
+    }
+    if (needsCaps) {
+      c = std::toupper(c);
+      needsCaps = false;
+    }
+    ret += c;
+  }
+  return ret;
+}
+
+inline void init_options() {
+  llvm::outs() << "==== Opts.td ====\n";
+  const char *header = R"(include "llvm/Option/OptParser.td"
+
+class F<string letter, string help> : Flag<["-"], letter>, HelpText<help>;
+class FF<string name, string help> : Flag<["--"], name>, HelpText<help>;
+
+multiclass Eq<string name, string help> {
+  def NAME #_EQ : Joined<["--"], name #"=">, HelpText<help>;
+  def : Separate<["--"], name>, Alias<!cast<Joined>(NAME #_EQ)>;
+}
+
+def help : FF<"help", "Display this help">;
+def : F<"h", "Alias for --help">, Alias<help>;
+def version : FF<"version", "Display the version">;
+def : F<"V", "Alias for --version">, Alias<version>;
+)";
+  llvm::outs() << header;
+  for (auto &opt : options) {
+    llvm::transform(opt.name,
+                    std::back_insert_iterator<std::string>(opt.optName),
+                    [](char c) {
+                      if (c == '-')
+                        c = '_';
+                      return c;
+                    });
+    bool flag = opt.type == "bool";
+    llvm::outs() << "def" << (flag ? " " : "m ");
+    if (!opt.alias)
+      llvm::outs() << opt.optName << ' ';
+    llvm::outs() << ": " << (flag ? "FF" : "Eq");
+    llvm::outs() << "<\"" << opt.name << "\", \"" << opt.desc << "\">";
+    if (opt.alias)
+      llvm::outs() << ", Alias<" << opt.aliasFor << ">";
+    llvm::outs() << ";\n";
+
+    if (!flag)
+      opt.optName += "_EQ";
+  }
+  llvm::outs() << "==== Config ====\n";
+  llvm::outs() << "struct DriverConfig {\n";
+  for (auto &opt : options) {
+    if (opt.alias)
+      continue;
+    opt.configName = generateCPPName(opt.name);
+    llvm::outs() << "  " << opt.type << ' ' << opt.configName;
+    if (opt.type == "bool")
+      llvm::outs() << " = false";
+    llvm::outs() << ";\n";
+  }
+  llvm::outs() << "};\n";
+  llvm::outs() << "==== Table ====\n";
+  const char *table = R"(using namespace llvm::opt;
+enum ID {
+  OPT_INVALID = 0, // This is not an option ID.
+#define OPTION(PREFIX, NAME, ID, KIND, GROUP, ALIAS, ALIASARGS, FLAGS, PARAM,  \
+               HELPTEXT, METAVAR, VALUES)                                      \
+  OPT_##ID,
+#include "Opts.inc"
+#undef OPTION
+};
+
+#define PREFIX(NAME, VALUE) const char *const NAME[] = VALUE;
+#include "Opts.inc"
+#undef PREFIX
+
+const opt::OptTable::Info InfoTable[] = {
+#define OPTION(PREFIX, NAME, ID, KIND, GROUP, ALIAS, ALIASARGS, FLAGS, PARAM,  \
+               HELPTEXT, METAVAR, VALUES)                                      \
+  {                                                                            \
+      PREFIX,      NAME,      HELPTEXT,                                        \
+      METAVAR,     OPT_##ID,  opt::Option::KIND##Class,                        \
+      PARAM,       FLAGS,     OPT_##GROUP,                                     \
+      OPT_##ALIAS, ALIASARGS, VALUES},
+#include "Opts.inc"
+#undef OPTION
+};
+
+class ${TOOL}OptTable : public opt::OptTable {
+public:
+  ${TOOL}OptTable() : OptTable(InfoTable) { setGroupedShortOptions(true); }
+};
+)";
+  llvm::outs() << table;
+
+  llvm::outs() << "==== ParseArgs ====\n";
+  const char *parseHeader = R"(  ${TOOL}OptTable Tbl;
+  ToolName = argv[0];
+  BumpPtrAllocator A;
+  StringSaver Saver{A};
+  opt::InputArgList Args =
+      Tbl.parseArgs(argc, argv, OPT_UNKNOWN, Saver, [&](StringRef Msg) {
+        fatalError(Msg);
+        std::exit(1);
+      });
+  if (Args.hasArg(OPT_help)) {
+    Tbl.printHelp(llvm::outs(), ${TODO});
+    std::exit(0);
+  }
+  if (Args.hasArg(OPT_version)) {
+    llvm::outs() << ToolName << '\n';
+    cl::PrintVersionMessage();
+    std::exit(0);
+  }
+
+  DriverConfig Config;
+)";
+  llvm::outs() << parseHeader;
+  for (const auto &opt : options) {
+    if (opt.alias)
+      continue;
+    if (opt.type == "bool") {
+      llvm::outs() << "  Config." << opt.configName << " = Args.hasArg(OPT_"
+                   << opt.optName << ");\n";
+      continue;
+    }
+    if (llvm::StringRef(opt.type).starts_with("std::vector")) {
+      llvm::outs() << "  for (const opt::Arg *A : Args.filtered(OPT_"
+                   << opt.optName << "))\n";
+      llvm::outs() << "    Config." << opt.configName
+                   << ".push_back(A->getValue());\n";
+      continue;
+    }
+    if (opt.type == "Optional<std::string>") {
+      llvm::outs() << "  if (const opt::Arg *A = Args.getLastArg(OPT_"
+                   << opt.optName << "))\n";
+      llvm::outs() << "    Config." << opt.configName << " = A->getValue();\n";
+      continue;
+    }
+    llvm::outs() << "  // TODO: Config." << opt.configName << '\n';
+  }
+  std::exit(0);
+}
+} // namespace internal
+
 namespace llvm {
 
 namespace vfs {
@@ -413,7 +585,10 @@ struct desc {
 
   desc(StringRef Str) : Desc(Str) {}
 
-  void apply(Option &O) const { O.setDescription(Desc); }
+  void apply(Option &O) const {
+    ::internal::options.back().desc = Desc;
+    O.setDescription(Desc);
+  }
 };
 
 // Modifier to set the value description shown in the -help output...
@@ -422,7 +597,10 @@ struct value_desc {
 
   value_desc(StringRef Str) : Desc(Str) {}
 
-  void apply(Option &O) const { O.setValueStr(Desc); }
+  void apply(Option &O) const {
+    O.setValueStr(Desc);
+    ::internal::options.back().desc = Desc;
+  }
 };
 
 // Specify a default (initial) value for the command line argument, if the
@@ -1445,6 +1623,24 @@ public:
   DataType operator->() const { return Value; }
 };
 
+template <typename T> constexpr auto type_name_str() {
+#if defined(__clang__)
+  constexpr auto prefix = sizeof("constexpr auto type_name_str() [T = ") - 1;
+  constexpr auto suffix = sizeof("]") - 1;
+  std::string_view name = __PRETTY_FUNCTION__;
+#elif defined(__GNUC__)
+  constexpr auto prefix =
+      sizeof("constexpr auto type_name_str() [with T = ") - 1;
+  constexpr auto suffix = sizeof("]") - 1;
+  std::string_view name = __PRETTY_FUNCTION__;
+#elif defined(_MSC_VER)
+  constexpr auto prefix = sizeof("auto __cdecl type_name_str<") - 1;
+  constexpr auto suffix = sizeof(">(void)") - 1;
+  std::string_view name = __FUNCSIG__;
+#endif
+  return name.substr(prefix, name.size() - prefix - suffix);
+}
+
 //===----------------------------------------------------------------------===//
 // A scalar command line option.
 //
@@ -1531,6 +1727,14 @@ public:
   template <class... Mods>
   explicit opt(const Mods &... Ms)
       : Option(llvm::cl::Optional, NotHidden), Parser(*this) {
+    ::internal::options.emplace_back();
+    auto t = std::make_tuple(Ms...);
+    if constexpr (std::is_convertible_v<decltype(std::get<0>(t)), const char *>)
+      ::internal::options.back().name = std::get<0>(t);
+    if constexpr (std::is_same_v<std::string, DataType>)
+      ::internal::options.back().type = "Optional<std::string>";
+    else
+      ::internal::options.back().type = type_name_str<DataType>();
     apply(this, Ms...);
     done();
   }
@@ -1778,6 +1982,16 @@ public:
   template <class... Mods>
   explicit list(const Mods &... Ms)
       : Option(ZeroOrMore, NotHidden), Parser(*this) {
+    ::internal::options.emplace_back();
+    auto t = std::make_tuple(Ms...);
+    if constexpr (std::is_convertible_v<decltype(std::get<0>(t)), const char *>)
+      ::internal::options.back().name = std::get<0>(t);
+    ::internal::options.back().type = "std::vector<";
+    if constexpr (std::is_same_v<std::string, DataType>)
+      ::internal::options.back().type += "Optional<std::string>";
+    else
+      ::internal::options.back().type += type_name_str<DataType>();
+    ::internal::options.back().type += ">";
     apply(this, Ms...);
     done();
   }
@@ -2004,8 +2218,14 @@ public:
   template <class... Mods>
   explicit alias(const Mods &... Ms)
       : Option(Optional, Hidden), AliasFor(nullptr) {
+    ::internal::options.emplace_back();
+    auto t = std::make_tuple(Ms...);
+    if constexpr (std::is_convertible_v<decltype(std::get<0>(t)), const char *>)
+      ::internal::options.back().name = std::get<0>(t);
+    ::internal::options.back().alias = true;
     apply(this, Ms...);
     done();
+    ::internal::options.back().aliasFor = AliasFor->ArgStr.str();
   }
 };
 
