@@ -20,6 +20,7 @@
 #define LLVM_SUPPORT_COMMANDLINE_H
 
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
@@ -46,7 +47,7 @@ namespace llvm {
 
 namespace cl {
 class Option;
-}
+} // namespace cl
 } // namespace llvm
 
 namespace internal {
@@ -2438,14 +2439,26 @@ LLVM_ABI bool ProvidePositionalOption(Option *Handler, StringRef Arg, int i);
 namespace internal {
 
 inline void init_options() {
-  llvm::StringMap<llvm::SmallVector<internal::Option *, 8>> SubcommandToOptions;
+  llvm::DenseMap<llvm::cl::SubCommand *, llvm::SmallVector<internal::Option *, 8>> SubcommandToOptions;
+  llvm::DenseSet<llvm::cl::SubCommand> AllSubCommands;
   for (auto &Opt : options) {
     if (!Opt.clOpt || Opt.clOpt->Subs.empty()) {
-      SubcommandToOptions[""].push_back(&Opt);
+      // SubcommandToOptions[""].push_back(&Opt);
       continue;
     }
-    for (auto *S : Opt.clOpt->Subs)
-      SubcommandToOptions[S->getName()].push_back(&Opt);
+    for (auto *S : Opt.clOpt->Subs) {
+      SubcommandToOptions[S].push_back(&Opt);
+      AllSubCommands.insert(*S);
+    }
+  }
+
+  for (auto &SC : AllSubCommands) {
+    std::string SCName = ("sc_" + llvm::Twine(SC.getName())).str();
+    // llvm::StringRef HelpText = SC.getDescription();
+    llvm::outs() << "def " << SCName << "Subcommand : Subcommand<"
+                   << "\"" << SC.getName() << "\"" 
+                   << "\"" << SC.getDescription() << "\"" 
+                   << ">;\n";
   }
 
   llvm::outs() << "==== Opts.td ====\n";
@@ -2466,10 +2479,7 @@ def : F<"V", "Alias for --version">, Alias<version>;
 )";
   llvm::outs() << header;
 
-  for (auto &Pair : SubcommandToOptions) {
-    if (!Pair.getKey().empty())
-      llvm::outs() << "def " << Pair.getKey() << "Subcommand : Subcommand<\""
-                   << Pair.getKey() << "\">;\n";
+  for (auto &Pair : SubcommandToOptions) {   
     for (auto *opt : Pair.getValue()) {
       llvm::transform(opt->name,
                       std::back_insert_iterator<std::string>(opt->optName),

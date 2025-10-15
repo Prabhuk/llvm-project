@@ -3465,6 +3465,7 @@ static int order_main() {
 }
 
 int main(int argc, const char *argv[]) {
+  ::internal::init_options();
   StringRef ProgName(sys::path::filename(argv[0]));
 
   if (argc < 2) {
