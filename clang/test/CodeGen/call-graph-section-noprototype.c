@@ -94,13 +94,13 @@ void test_promoted_args() {
   fp((short)1, (float)2.0);
 }
 
-// ITANIUM: [[F_TVOID_NOPROTO]] = !{!"_ZTSFvE"}
+// ITANIUM: [[F_TVOID_NOPROTO]] = !{!"_ZTSFvvE"}
 // ITANIUM: [[F_TVOID]] = !{!"_ZTSFvvE"}
 // ITANIUM: [[F_TVOID_CT]] = !{[[F_TVOID]]}
-// ITANIUM: [[F_TMY_STRUCT_NOPROTO]] = !{!"_ZTSFP9my_structE"}
+// ITANIUM: [[F_TMY_STRUCT_NOPROTO]] = !{!"_ZTSFP9my_structvE"}
 // ITANIUM: [[F_TMY_STRUCT_CT]] = !{[[F_TMY_STRUCT:![0-9]+]]}
 // ITANIUM: [[F_TMY_STRUCT]] = !{!"_ZTSFP9my_structvE"}
-// ITANIUM: [[F_TINT_NOPROTO]] = !{!"_ZTSFiE"}
+// ITANIUM: [[F_TINT_NOPROTO]] = !{!"_ZTSFivE"}
 // ITANIUM: [[F_TINT_CT]] = !{[[F_TINT:![0-9]+]]}
 // ITANIUM: [[F_TINT]] = !{!"_ZTSFivE"}
 // ITANIUM: [[F_TINT_ARG_CT]] = !{[[F_TINT_ARG:![0-9]+]]}
@@ -108,13 +108,13 @@ void test_promoted_args() {
 // ITANIUM: [[F_TMULTI_ARG_CT]] = !{[[F_TMULTI_ARG:![0-9]+]]}
 // ITANIUM: [[F_TMULTI_ARG]] = !{!"_ZTSFvidE"}
 
-// MS: [[F_TVOID_NOPROTO]] = !{!"?6AX@Z"}
+// MS: [[F_TVOID_NOPROTO]] = !{!"?6AXXZ"}
 // MS: [[F_TVOID]] = !{!"?6AXXZ"}
 // MS: [[F_TVOID_CT]] = !{[[F_TVOID]]}
-// MS: [[F_TMY_STRUCT_NOPROTO]] = !{!"?6APEAUmy_struct@@@Z"}
+// MS: [[F_TMY_STRUCT_NOPROTO]] = !{!"?6APEAUmy_struct@@XZ"}
 // MS: [[F_TMY_STRUCT_CT]] = !{[[F_TMY_STRUCT:![0-9]+]]}
 // MS: [[F_TMY_STRUCT]] = !{!"?6APEAUmy_struct@@XZ"}
-// MS: [[F_TINT_NOPROTO]] = !{!"?6AH@Z"}
+// MS: [[F_TINT_NOPROTO]] = !{!"?6AHXZ"}
 // MS: [[F_TINT_CT]] = !{[[F_TINT:![0-9]+]]}
 // MS: [[F_TINT]] = !{!"?6AHXZ"}
 // MS: [[F_TINT_ARG_CT]] = !{[[F_TINT_ARG:![0-9]+]]}
