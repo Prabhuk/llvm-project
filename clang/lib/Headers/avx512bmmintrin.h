@@ -59,8 +59,12 @@
 /// \note This instruction does not support masking.
 static __inline __m512i __DEFAULT_FN_ATTRS_CONSTEXPR
 _mm512_bmacor16x16x16(__m512i __A, __m512i __B, __m512i __C) {
+#if __has_builtin(__builtin_ia32_bmacor16x16x16_v32hi)
   return (__m512i)__builtin_ia32_bmacor16x16x16_v32hi(
       (__v32hi)__A, (__v32hi)__B, (__v32hi)__C);
+#else
+  return __C;
+#endif
 }
 
 /// Multiplies two 16x16 bit matrices using XOR reduction and XORs the product
@@ -96,8 +100,12 @@ _mm512_bmacor16x16x16(__m512i __A, __m512i __B, __m512i __C) {
 /// \note This instruction does not support masking.
 static __inline __m512i __DEFAULT_FN_ATTRS_CONSTEXPR
 _mm512_bmacxor16x16x16(__m512i __A, __m512i __B, __m512i __C) {
+#if __has_builtin(__builtin_ia32_bmacxor16x16x16_v32hi)
   return (__m512i)__builtin_ia32_bmacxor16x16x16_v32hi(
       (__v32hi)__A, (__v32hi)__B, (__v32hi)__C);
+#else
+  return __C;
+#endif
 }
 
 /// Reverses the bits within each byte of the source vector.

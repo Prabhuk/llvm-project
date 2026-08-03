@@ -62,8 +62,12 @@
 /// \note This instruction does not support masking.
 static __inline __m256i __DEFAULT_FN_ATTRS256_CONSTEXPR
 _mm256_bmacor16x16x16(__m256i __A, __m256i __B, __m256i __C) {
+#if __has_builtin(__builtin_ia32_bmacor16x16x16_v16hi)
   return (__m256i)__builtin_ia32_bmacor16x16x16_v16hi(
       (__v16hi)__A, (__v16hi)__B, (__v16hi)__C);
+#else
+  return __C;
+#endif
 }
 
 /// Multiplies two 16x16 bit matrices using XOR reduction and XORs the product
@@ -97,8 +101,12 @@ _mm256_bmacor16x16x16(__m256i __A, __m256i __B, __m256i __C) {
 /// \note This instruction does not support masking.
 static __inline __m256i __DEFAULT_FN_ATTRS256_CONSTEXPR
 _mm256_bmacxor16x16x16(__m256i __A, __m256i __B, __m256i __C) {
+#if __has_builtin(__builtin_ia32_bmacxor16x16x16_v16hi)
   return (__m256i)__builtin_ia32_bmacxor16x16x16_v16hi(
       (__v16hi)__A, (__v16hi)__B, (__v16hi)__C);
+#else
+  return __C;
+#endif
 }
 
 /// Reverses the bits within each byte of the source vector.
