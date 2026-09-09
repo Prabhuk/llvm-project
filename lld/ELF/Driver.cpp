@@ -55,6 +55,7 @@
 #include "llvm/Remarks/HotnessThresholdParser.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Compression.h"
+#include "llvm/Support/DataExtractor.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/GlobPattern.h"
 #include "llvm/Support/LEB128.h"
@@ -1100,6 +1101,163 @@ template <class ELFT> static void readCallGraphsFromObjectFiles(Ctx &ctx) {
   }
 }
 
+template <class ELFT> static void ReadCallGraphFromCallGraphSection(Ctx &Ctx) {
+  struct ParsedCallGraphRecord {
+    InputSectionBase *CallerSec = nullptr;
+    SmallVector<InputSectionBase *, 4> DirectCallees;
+    SmallVector<uint64_t, 2> IndirectTypeIDs;
+  };
+
+  DenseMap<uint64_t, SmallVector<InputSectionBase *, 4>> TypeIdToTargets;
+  SmallVector<ParsedCallGraphRecord, 64> ParsedRecords;
+
+  for (ELFFileBase *File : Ctx.objectFiles) {
+    auto *Obj = cast<ObjFile<ELFT>>(File);
+    for (InputSectionBase *ISec : Obj->getSections()) {
+      if (!ISec || ISec == &InputSection::discarded ||
+          ISec->type != ELF::SHT_LLVM_CALL_GRAPH)
+        continue;
+
+      if (!ISec->isLive())
+        continue;
+
+      DenseMap<uint64_t, uint32_t> OffsetToSym;
+      const RelsOrRelas<ELFT> Rels =
+          ISec->template relsOrRelas<ELFT>(/*supportsCrel=*/false);
+      for (const typename ELFT::Rela &Rel : Rels.relas)
+        OffsetToSym[Rel.r_offset] = Rel.getSymbol(Ctx.arg.isMips64EL);
+      for (const typename ELFT::Rel &Rel : Rels.rels)
+        OffsetToSym[Rel.r_offset] = Rel.getSymbol(Ctx.arg.isMips64EL);
+
+      ArrayRef<uint8_t> Contents = ISec->content();
+      DataExtractor Data(Contents, Ctx.arg.isLE);
+      DataExtractor::Cursor C(0);
+
+      while (C && C.tell() < ISec->size) {
+        uint8_t FormatVersion = Data.getU8(C);
+        if (!C)
+          break;
+        if (FormatVersion != 0) {
+          Warn(Ctx) << ISec << ": unknown format version ["
+                    << (unsigned)FormatVersion
+                    << "] in SHT_LLVM_CALL_GRAPH section";
+          break;
+        }
+
+        uint8_t FlagsVal = Data.getU8(C);
+        if (!C)
+          break;
+
+        bool IsIndirectTarget = (FlagsVal & 1) != 0;
+        bool HasDirectCallees = (FlagsVal & 2) != 0;
+        bool HasIndirectCallees = (FlagsVal & 4) != 0;
+
+        uint64_t FuncAddrOffset = C.tell();
+        Data.getUnsigned(C, sizeof(typename ELFT::uint));
+        uint64_t FuncTypeID = Data.getU64(C);
+        if (!C)
+          break;
+
+        InputSectionBase *CallerSec = nullptr;
+        auto CallerIt = OffsetToSym.find(FuncAddrOffset);
+        if (CallerIt != OffsetToSym.end()) {
+          Symbol &CallerSym = Obj->getSymbol(CallerIt->second);
+          if (auto *CallerDef = dyn_cast<Defined>(&CallerSym))
+            CallerSec = dyn_cast_or_null<InputSectionBase>(CallerDef->section);
+        }
+
+        SmallVector<InputSectionBase *, 4> DirectCalleeSecs;
+        if (HasDirectCallees) {
+          uint64_t NumDirectCallees = Data.getULEB128(C);
+          for (uint64_t I = 0; I < NumDirectCallees && C; ++I) {
+            uint64_t CalleeOffset = C.tell();
+            Data.getUnsigned(C, sizeof(typename ELFT::uint));
+            auto CalleeIt = OffsetToSym.find(CalleeOffset);
+            if (CalleeIt != OffsetToSym.end()) {
+              Symbol &CalleeSym = Obj->getSymbol(CalleeIt->second);
+              if (auto *CalleeDef = dyn_cast<Defined>(&CalleeSym)) {
+                if (auto *CalleeSec = dyn_cast_or_null<InputSectionBase>(
+                        CalleeDef->section)) {
+                  if (CalleeSec->isLive() && CalleeSec != CallerSec)
+                    DirectCalleeSecs.push_back(CalleeSec);
+                }
+              }
+            }
+          }
+        }
+
+        SmallVector<uint64_t, 2> IndirectTypeIDs;
+        if (HasIndirectCallees) {
+          uint64_t NumIndirectTargetTypeIDs = Data.getULEB128(C);
+          for (uint64_t I = 0; I < NumIndirectTargetTypeIDs && C; ++I) {
+            uint64_t TargetTypeID = Data.getU64(C);
+            IndirectTypeIDs.push_back(TargetTypeID);
+          }
+        }
+
+        if (!CallerSec || !CallerSec->isLive())
+          continue;
+
+        if (IsIndirectTarget && FuncTypeID != 0)
+          TypeIdToTargets[FuncTypeID].push_back(CallerSec);
+
+        ParsedRecords.push_back({CallerSec, std::move(DirectCalleeSecs),
+                                 std::move(IndirectTypeIDs)});
+      }
+      if (!C)
+        consumeError(C.takeError());
+    }
+  }
+
+  for (auto &Entry : TypeIdToTargets) {
+    SmallVector<InputSectionBase *, 4> &Targets = Entry.second;
+    llvm::sort(Targets);
+    Targets.erase(std::unique(Targets.begin(), Targets.end()), Targets.end());
+  }
+
+  constexpr uint64_t DirectCallWeight = 10000;
+  constexpr uint64_t IndirectCallWeight = 10000;
+
+  for (ParsedCallGraphRecord &Record : ParsedRecords) {
+    if (!Record.CallerSec || !Record.CallerSec->isLive())
+      continue;
+
+    llvm::sort(Record.DirectCallees);
+    Record.DirectCallees.erase(
+        std::unique(Record.DirectCallees.begin(), Record.DirectCallees.end()),
+        Record.DirectCallees.end());
+
+    for (InputSectionBase *CalleeSec : Record.DirectCallees) {
+      if (CalleeSec->isLive())
+        Ctx.arg.callGraphProfile[{Record.CallerSec, CalleeSec}] +=
+            DirectCallWeight;
+    }
+
+    for (uint64_t TypeID : Record.IndirectTypeIDs) {
+      auto It = TypeIdToTargets.find(TypeID);
+      if (It == TypeIdToTargets.end())
+        continue;
+      const SmallVector<InputSectionBase *, 4> &Targets = It->second;
+      if (Targets.empty())
+        continue;
+
+      // Cap indirect call fan-out to prevent graph explosion on generic
+      // function pointer signatures.
+      constexpr size_t MaxIndirectTargets = 1024;
+      if (Targets.size() > MaxIndirectTargets)
+        continue;
+
+      uint64_t ScaledWeight =
+          std::max<uint64_t>(1, IndirectCallWeight / Targets.size());
+      for (InputSectionBase *TargetSec : Targets) {
+        if (TargetSec != Record.CallerSec && TargetSec->isLive())
+          Ctx.arg.callGraphProfile[{Record.CallerSec, TargetSec}] +=
+              ScaledWeight;
+      }
+    }
+  }
+}
+
 template <class ELFT>
 static void ltoValidateAllVtablesHaveTypeInfos(Ctx &ctx,
                                                opt::InputArgList &args) {
@@ -1172,6 +1330,18 @@ static CGProfileSortKind getCGProfileSortKind(Ctx &ctx,
     return CGProfileSortKind::Cdsort;
   if (s != "none")
     ErrAlways(ctx) << "unknown --call-graph-profile-sort= value: " << s;
+  return CGProfileSortKind::None;
+}
+
+static CGProfileSortKind GetCGSectionSortKind(Ctx &Ctx,
+                                              opt::InputArgList &Args) {
+  StringRef S = Args.getLastArgValue(OPT_call_graph_section_sort, "none");
+  if (S == "hfsort")
+    return CGProfileSortKind::Hfsort;
+  if (S == "cdsort")
+    return CGProfileSortKind::Cdsort;
+  if (S != "none")
+    ErrAlways(Ctx) << "unknown --call-graph-section-sort= value: " << S;
   return CGProfileSortKind::None;
 }
 
@@ -1406,6 +1576,7 @@ static void readConfigs(Ctx &ctx, opt::InputArgList &args) {
       ctx.arg.bsymbolic = BsymbolicKind::All;
   }
   ctx.arg.callGraphProfileSort = getCGProfileSortKind(ctx, args);
+  ctx.arg.callGraphSectionSort = GetCGSectionSortKind(ctx, args);
   parseBPOrdererOptions(ctx, args);
   ctx.arg.checkSections =
       args.hasFlag(OPT_check_sections, OPT_no_check_sections, true);
@@ -3584,13 +3755,20 @@ template <class ELFT> void LinkerDriver::link(opt::InputArgList &args) {
   }
 
   // Read the callgraph now that we know what was gced or icfed
-  if (ctx.arg.callGraphProfileSort != CGProfileSortKind::None) {
+  if (ctx.arg.callGraphProfileSort != CGProfileSortKind::None ||
+      ctx.arg.callGraphSectionSort != CGProfileSortKind::None) {
     if (auto *arg = args.getLastArg(OPT_call_graph_ordering_file)) {
       if (std::optional<MemoryBufferRef> buffer =
               readFile(ctx, arg->getValue()))
         readCallGraph(ctx, *buffer);
-    } else
-      readCallGraphsFromObjectFiles<ELFT>(ctx);
+    } else {
+      if (ctx.arg.callGraphSectionSort != CGProfileSortKind::None) {
+        ctx.arg.callGraphProfile.clear();
+        ReadCallGraphFromCallGraphSection<ELFT>(ctx);
+      } else if (ctx.arg.callGraphProfileSort != CGProfileSortKind::None) {
+        readCallGraphsFromObjectFiles<ELFT>(ctx);
+      }
+    }
   }
 
   // Write the result to the file.

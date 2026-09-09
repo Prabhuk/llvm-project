@@ -333,6 +333,7 @@ struct Config {
   bool armBe8 = false;
   BsymbolicKind bsymbolic = BsymbolicKind::None;
   CGProfileSortKind callGraphProfileSort;
+  CGProfileSortKind callGraphSectionSort = CGProfileSortKind::None;
   llvm::StringRef irpgoProfilePath;
   bool bpStartupFunctionSort = false;
   bool bpCompressionSortStartupFunctions = false;

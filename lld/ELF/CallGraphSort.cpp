@@ -341,7 +341,11 @@ computeCacheDirectedSortOrder(Ctx &ctx) {
 // according either to the C³ or Cache-Directed-Sort ordering algorithm.
 DenseMap<const InputSectionBase *, int>
 elf::computeCallGraphProfileOrder(Ctx &ctx) {
-  if (ctx.arg.callGraphProfileSort == CGProfileSortKind::Cdsort)
+  CGProfileSortKind SortKind =
+      ctx.arg.callGraphSectionSort != CGProfileSortKind::None
+          ? ctx.arg.callGraphSectionSort
+          : ctx.arg.callGraphProfileSort;
+  if (SortKind == CGProfileSortKind::Cdsort)
     return computeCacheDirectedSortOrder(ctx);
   return CallGraphSort(ctx).run();
 }

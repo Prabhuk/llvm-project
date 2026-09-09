@@ -145,6 +145,15 @@ def call_graph_profile_sort: JJ<"call-graph-profile-sort=">,
 def : FF<"no-call-graph-profile-sort">, Alias<call_graph_profile_sort>, AliasArgs<["none"]>,
   Flags<[HelpHidden]>;
 
+def call_graph_section_sort: JJ<"call-graph-section-sort=">,
+  HelpText<"Reorder input sections using call graph metadata from .llvm.callgraph sections (default: cdsort)">,
+  MetaVarName<"[none,hfsort,cdsort]">,
+  Values<"none,hfsort,cdsort">;
+def : FF<"call-graph-section-sort">, Alias<call_graph_section_sort>, AliasArgs<["cdsort"]>,
+  HelpText<"Alias for --call-graph-section-sort=cdsort">;
+def : FF<"no-call-graph-section-sort">, Alias<call_graph_section_sort>, AliasArgs<["none"]>,
+  HelpText<"Alias for --call-graph-section-sort=none">;
+
 defm irpgo_profile: EEq<"irpgo-profile",
   "Read a temporary profile file for use with --bp-startup-sort=">;
 def bp_compression_sort: JJ<"bp-compression-sort=">, MetaVarName<"[none,function,data,both]">,
