@@ -51,6 +51,7 @@
 #include "llvm/Config/llvm-config.h"
 #include "llvm/LTO/LTO.h"
 #include "llvm/Object/Archive.h"
+#include "llvm/Object/CallGraphSection.h"
 #include "llvm/Object/IRObjectFile.h"
 #include "llvm/Remarks/HotnessThresholdParser.h"
 #include "llvm/Support/CommandLine.h"
@@ -1102,23 +1103,141 @@ template <class ELFT> static void readCallGraphsFromObjectFiles(Ctx &ctx) {
 }
 
 template <class ELFT> static void ReadCallGraphFromCallGraphSection(Ctx &Ctx) {
-  struct ParsedCallGraphRecord {
-    InputSectionBase *CallerSec = nullptr;
-    SmallVector<InputSectionBase *, 4> DirectCallees;
-    SmallVector<uint64_t, 2> IndirectTypeIDs;
+  using namespace llvm::object;
+
+  // Phase 1: Classify ELF sections and symbols across all input object files.
+  // Note that in ELF (-ffunction-sections), relocations frequently target
+  // section symbols (STT_SECTION) which always carry STB_LOCAL binding in
+  // .symtab even when the underlying function has STB_GLOBAL/STB_WEAK binding.
+  // We inspect Obj->getSymbols() to determine each section's true effective
+  // linkage and to verify executable function status.
+  DenseSet<const InputSectionBase *> ExternalSections;
+  DenseSet<const InputSectionBase *> ExportedFuncSections;
+  DenseMap<const InputFile *, uint32_t> ObjectToTUId;
+
+  uint32_t NextTUId = 1;
+  for (ELFFileBase *File : Ctx.objectFiles) {
+    ObjectToTUId[File] = NextTUId++;
+    auto *Obj = cast<ObjFile<ELFT>>(File);
+    for (Symbol *Sym : Obj->getSymbols()) {
+      if (!Sym)
+        continue;
+      auto *Def = dyn_cast<Defined>(Sym);
+      if (!Def || !Def->section)
+        continue;
+      auto *ISec = dyn_cast<InputSectionBase>(Def->section);
+      if (!ISec || ISec == &InputSection::discarded || !ISec->isLive())
+        continue;
+
+      if (!Sym->isLocal())
+        ExternalSections.insert(ISec);
+
+      if ((ISec->flags & ELF::SHF_EXECINSTR) != 0) {
+        if (Sym->isSection() || Sym->type == ELF::STT_FUNC ||
+            Sym->type == ELF::STT_NOTYPE || Sym->type == ELF::STT_GNU_IFUNC) {
+          if (Sym->isExported || (Ctx.arg.shared && !Sym->isLocal() &&
+                                  Sym->visibility() == ELF::STV_DEFAULT))
+            ExportedFuncSections.insert(ISec);
+        }
+      }
+    }
+  }
+
+  CallGraphSectionReconstructor Reconstructor;
+  DenseMap<const InputSectionBase *, uint32_t> SectionToNodeId;
+  SmallVector<InputSectionBase *, 0> NodeIdToSection;
+
+  auto GetOrCreateNodeId = [&](InputSectionBase *ISec) -> uint32_t {
+    auto It = SectionToNodeId.find(ISec);
+    if (It != SectionToNodeId.end())
+      return It->second;
+
+    CallGraphFunctionNode Node;
+    Node.TranslationUnitId = ObjectToTUId.lookup(ISec->file);
+    Node.IsExternalLinkage = ExternalSections.contains(ISec);
+    Node.IsExecutable = (ISec->flags & ELF::SHF_EXECINSTR) != 0;
+    uint32_t NodeId = Reconstructor.AddFunctionNode(std::move(Node));
+    SectionToNodeId[ISec] = NodeId;
+    NodeIdToSection.push_back(ISec);
+    return NodeId;
   };
 
-  DenseMap<uint64_t, SmallVector<InputSectionBase *, 4>> TypeIdToTargets;
-  SmallVector<ParsedCallGraphRecord, 64> ParsedRecords;
+  auto ResolveCallableSection = [&](ObjFile<ELFT> *Obj,
+                                    uint32_t SymIdx) -> InputSectionBase * {
+    Symbol &Sym = Obj->getSymbol(SymIdx);
+    auto *Def = dyn_cast<Defined>(&Sym);
+    if (!Def || !Def->section)
+      return nullptr;
+    if (!Sym.isSection() && Sym.type != ELF::STT_FUNC &&
+        Sym.type != ELF::STT_NOTYPE && Sym.type != ELF::STT_GNU_IFUNC)
+      return nullptr;
+    auto *ISec = dyn_cast<InputSectionBase>(Def->section);
+    if (!ISec || ISec == &InputSection::discarded || !ISec->isLive())
+      return nullptr;
+    if ((ISec->flags & ELF::SHF_EXECINSTR) == 0)
+      return nullptr;
+    return ISec;
+  };
 
+  // Phase 2: Whole-Program Link-Time Address-Taken & Escape Verification.
+  for (const InputSectionBase *ISec : ExportedFuncSections) {
+    uint32_t NodeId = GetOrCreateNodeId(const_cast<InputSectionBase *>(ISec));
+    Reconstructor.AddAddressTakenFact(NodeId, ObjectToTUId.lookup(ISec->file),
+                                      /*IsGlobalEscape=*/true);
+  }
+
+  for (ELFFileBase *File : Ctx.objectFiles) {
+    auto *Obj = cast<ObjFile<ELFT>>(File);
+    uint32_t SourceTUId = ObjectToTUId.lookup(Obj);
+    for (InputSectionBase *RefSec : Obj->getSections()) {
+      if (!RefSec || RefSec == &InputSection::discarded || !RefSec->isLive())
+        continue;
+      if ((RefSec->flags & ELF::SHF_ALLOC) == 0 ||
+          RefSec->type == ELF::SHT_LLVM_CALL_GRAPH ||
+          RefSec->name == ".eh_frame" ||
+          RefSec->name.starts_with(".gcc_except_table"))
+        continue;
+
+      bool IsRefCode = (RefSec->flags & ELF::SHF_EXECINSTR) != 0;
+      bool IsRefExternal = ExternalSections.contains(RefSec);
+      ArrayRef<uint8_t> SecData =
+          IsRefCode ? RefSec->content() : ArrayRef<uint8_t>();
+
+      auto ProcessReloc = [&](uint64_t Offset, uint32_t SymIdx) {
+        InputSectionBase *TargetSec = ResolveCallableSection(Obj, SymIdx);
+        if (!TargetSec)
+          return;
+
+        if (IsRefCode && Ctx.arg.emachine == ELF::EM_X86_64 &&
+            CallGraphSectionReconstructor::IsX86_64DirectBranchInstruction(
+                SecData, Offset))
+          return;
+
+        uint32_t TargetNodeId = GetOrCreateNodeId(TargetSec);
+        auto *TargetObj = dyn_cast_or_null<ObjFile<ELFT>>(TargetSec->file);
+        bool TargetIsLocal = !ExternalSections.contains(TargetSec);
+        bool IsGlobalEscape =
+            (TargetObj != Obj || IsRefExternal || IsRefCode || !TargetIsLocal);
+        Reconstructor.AddAddressTakenFact(TargetNodeId, SourceTUId,
+                                          IsGlobalEscape);
+      };
+
+      const RelsOrRelas<ELFT> Rels =
+          RefSec->template relsOrRelas<ELFT>(/*supportsCrel=*/false);
+      for (const typename ELFT::Rela &Rel : Rels.relas)
+        ProcessReloc(Rel.r_offset, Rel.getSymbol(Ctx.arg.isMips64EL));
+      for (const typename ELFT::Rel &Rel : Rels.rels)
+        ProcessReloc(Rel.r_offset, Rel.getSymbol(Ctx.arg.isMips64EL));
+    }
+  }
+
+  // Phase 3: Parse SHT_LLVM_CALL_GRAPH sections into
+  // CallGraphSectionReconstructor.
   for (ELFFileBase *File : Ctx.objectFiles) {
     auto *Obj = cast<ObjFile<ELFT>>(File);
     for (InputSectionBase *ISec : Obj->getSections()) {
       if (!ISec || ISec == &InputSection::discarded ||
-          ISec->type != ELF::SHT_LLVM_CALL_GRAPH)
-        continue;
-
-      if (!ISec->isLive())
+          ISec->type != ELF::SHT_LLVM_CALL_GRAPH || !ISec->isLive())
         continue;
 
       DenseMap<uint64_t, uint32_t> OffsetToSym;
@@ -1137,7 +1256,7 @@ template <class ELFT> static void ReadCallGraphFromCallGraphSection(Ctx &Ctx) {
         uint8_t FormatVersion = Data.getU8(C);
         if (!C)
           break;
-        if (FormatVersion != 0) {
+        if (FormatVersion != CallGraphSectionFormat::FormatVersion) {
           Warn(Ctx) << ISec << ": unknown format version ["
                     << (unsigned)FormatVersion
                     << "] in SHT_LLVM_CALL_GRAPH section";
@@ -1148,9 +1267,12 @@ template <class ELFT> static void ReadCallGraphFromCallGraphSection(Ctx &Ctx) {
         if (!C)
           break;
 
-        bool IsIndirectTarget = (FlagsVal & 1) != 0;
-        bool HasDirectCallees = (FlagsVal & 2) != 0;
-        bool HasIndirectCallees = (FlagsVal & 4) != 0;
+        bool IsIndirectTarget =
+            (FlagsVal & CallGraphSectionFormat::FlagIsIndirectTarget) != 0;
+        bool HasDirectCallees =
+            (FlagsVal & CallGraphSectionFormat::FlagHasDirectCallees) != 0;
+        bool HasIndirectCallees =
+            (FlagsVal & CallGraphSectionFormat::FlagHasIndirectCallees) != 0;
 
         uint64_t FuncAddrOffset = C.tell();
         Data.getUnsigned(C, sizeof(typename ELFT::uint));
@@ -1160,13 +1282,10 @@ template <class ELFT> static void ReadCallGraphFromCallGraphSection(Ctx &Ctx) {
 
         InputSectionBase *CallerSec = nullptr;
         auto CallerIt = OffsetToSym.find(FuncAddrOffset);
-        if (CallerIt != OffsetToSym.end()) {
-          Symbol &CallerSym = Obj->getSymbol(CallerIt->second);
-          if (auto *CallerDef = dyn_cast<Defined>(&CallerSym))
-            CallerSec = dyn_cast_or_null<InputSectionBase>(CallerDef->section);
-        }
+        if (CallerIt != OffsetToSym.end())
+          CallerSec = ResolveCallableSection(Obj, CallerIt->second);
 
-        SmallVector<InputSectionBase *, 4> DirectCalleeSecs;
+        SmallVector<uint32_t, 4> DirectCalleeNodeIds;
         if (HasDirectCallees) {
           uint64_t NumDirectCallees = Data.getULEB128(C);
           for (uint64_t I = 0; I < NumDirectCallees && C; ++I) {
@@ -1174,87 +1293,49 @@ template <class ELFT> static void ReadCallGraphFromCallGraphSection(Ctx &Ctx) {
             Data.getUnsigned(C, sizeof(typename ELFT::uint));
             auto CalleeIt = OffsetToSym.find(CalleeOffset);
             if (CalleeIt != OffsetToSym.end()) {
-              Symbol &CalleeSym = Obj->getSymbol(CalleeIt->second);
-              if (auto *CalleeDef = dyn_cast<Defined>(&CalleeSym)) {
-                if (auto *CalleeSec = dyn_cast_or_null<InputSectionBase>(
-                        CalleeDef->section)) {
-                  if (CalleeSec->isLive() && CalleeSec != CallerSec)
-                    DirectCalleeSecs.push_back(CalleeSec);
-                }
+              if (InputSectionBase *CalleeSec =
+                      ResolveCallableSection(Obj, CalleeIt->second)) {
+                if (CalleeSec != CallerSec)
+                  DirectCalleeNodeIds.push_back(GetOrCreateNodeId(CalleeSec));
               }
             }
           }
         }
 
-        SmallVector<uint64_t, 2> IndirectTypeIDs;
+        SmallVector<uint64_t, 4> IndirectTypeIDs;
         if (HasIndirectCallees) {
           uint64_t NumIndirectTargetTypeIDs = Data.getULEB128(C);
-          for (uint64_t I = 0; I < NumIndirectTargetTypeIDs && C; ++I) {
-            uint64_t TargetTypeID = Data.getU64(C);
-            IndirectTypeIDs.push_back(TargetTypeID);
-          }
+          for (uint64_t I = 0; I < NumIndirectTargetTypeIDs && C; ++I)
+            IndirectTypeIDs.push_back(Data.getU64(C));
         }
 
-        if (!CallerSec || !CallerSec->isLive())
+        if (!CallerSec)
           continue;
 
-        if (IsIndirectTarget && FuncTypeID != 0)
-          TypeIdToTargets[FuncTypeID].push_back(CallerSec);
-
-        ParsedRecords.push_back({CallerSec, std::move(DirectCalleeSecs),
-                                 std::move(IndirectTypeIDs)});
+        uint32_t CallerNodeId = GetOrCreateNodeId(CallerSec);
+        CallGraphFunctionNode &CallerNode =
+            Reconstructor.GetFunctionNode(CallerNodeId);
+        if (IsIndirectTarget && FuncTypeID != 0) {
+          CallerNode.IsIndirectTarget = true;
+          CallerNode.FunctionTypeId = FuncTypeID;
+        }
+        CallerNode.DirectCalleeNodeIds.append(DirectCalleeNodeIds.begin(),
+                                              DirectCalleeNodeIds.end());
+        CallerNode.IndirectCalleeTypeIds.append(IndirectTypeIDs.begin(),
+                                                IndirectTypeIDs.end());
       }
       if (!C)
         consumeError(C.takeError());
     }
   }
 
-  for (auto &Entry : TypeIdToTargets) {
-    SmallVector<InputSectionBase *, 4> &Targets = Entry.second;
-    llvm::sort(Targets);
-    Targets.erase(std::unique(Targets.begin(), Targets.end()), Targets.end());
-  }
-
-  constexpr uint64_t DirectCallWeight = 10000;
-  constexpr uint64_t IndirectCallWeight = 10000;
-
-  for (ParsedCallGraphRecord &Record : ParsedRecords) {
-    if (!Record.CallerSec || !Record.CallerSec->isLive())
-      continue;
-
-    llvm::sort(Record.DirectCallees);
-    Record.DirectCallees.erase(
-        std::unique(Record.DirectCallees.begin(), Record.DirectCallees.end()),
-        Record.DirectCallees.end());
-
-    for (InputSectionBase *CalleeSec : Record.DirectCallees) {
-      if (CalleeSec->isLive())
-        Ctx.arg.callGraphProfile[{Record.CallerSec, CalleeSec}] +=
-            DirectCallWeight;
-    }
-
-    for (uint64_t TypeID : Record.IndirectTypeIDs) {
-      auto It = TypeIdToTargets.find(TypeID);
-      if (It == TypeIdToTargets.end())
-        continue;
-      const SmallVector<InputSectionBase *, 4> &Targets = It->second;
-      if (Targets.empty())
-        continue;
-
-      // Cap indirect call fan-out to prevent graph explosion on generic
-      // function pointer signatures.
-      constexpr size_t MaxIndirectTargets = 1024;
-      if (Targets.size() > MaxIndirectTargets)
-        continue;
-
-      uint64_t ScaledWeight =
-          std::max<uint64_t>(1, IndirectCallWeight / Targets.size());
-      for (InputSectionBase *TargetSec : Targets) {
-        if (TargetSec != Record.CallerSec && TargetSec->isLive())
-          Ctx.arg.callGraphProfile[{Record.CallerSec, TargetSec}] +=
-              ScaledWeight;
-      }
-    }
+  // Phase 4: Reconstruct call graph and populate Ctx.arg.callGraphProfile.
+  Reconstructor.BuildGraph();
+  for (const ReconstructedCallGraphEdge &Edge : Reconstructor.GetEdges()) {
+    InputSectionBase *FromSec = NodeIdToSection[Edge.FromNodeId];
+    InputSectionBase *ToSec = NodeIdToSection[Edge.ToNodeId];
+    if (FromSec && ToSec && FromSec->isLive() && ToSec->isLive())
+      Ctx.arg.callGraphProfile[{FromSec, ToSec}] += Edge.Weight;
   }
 }
 
