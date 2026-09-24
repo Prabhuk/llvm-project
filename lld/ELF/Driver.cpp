@@ -1387,15 +1387,15 @@ static CGProfileSortKind getCGProfileSortKind(Ctx &ctx,
   return CGProfileSortKind::None;
 }
 
-static CGProfileSortKind GetCGSectionSortKind(Ctx &Ctx,
-                                              opt::InputArgList &Args) {
-  StringRef S = Args.getLastArgValue(OPT_call_graph_section_sort, "none");
-  if (S == "hfsort")
+static CGProfileSortKind getCGSectionSortKind(Ctx &ctx,
+                                              opt::InputArgList &args) {
+  StringRef s = args.getLastArgValue(OPT_call_graph_section_sort, "none");
+  if (s == "hfsort")
     return CGProfileSortKind::Hfsort;
-  if (S == "cdsort")
+  if (s == "cdsort")
     return CGProfileSortKind::Cdsort;
-  if (S != "none")
-    ErrAlways(Ctx) << "unknown --call-graph-section-sort= value: " << S;
+  if (s != "none")
+    ErrAlways(ctx) << "unknown --call-graph-section-sort= value: " << s;
   return CGProfileSortKind::None;
 }
 
@@ -1630,7 +1630,7 @@ static void readConfigs(Ctx &ctx, opt::InputArgList &args) {
       ctx.arg.bsymbolic = BsymbolicKind::All;
   }
   ctx.arg.callGraphProfileSort = getCGProfileSortKind(ctx, args);
-  ctx.arg.callGraphSectionSort = GetCGSectionSortKind(ctx, args);
+  ctx.arg.callGraphSectionSort = getCGSectionSortKind(ctx, args);
   parseBPOrdererOptions(ctx, args);
   ctx.arg.checkSections =
       args.hasFlag(OPT_check_sections, OPT_no_check_sections, true);

@@ -146,13 +146,13 @@ def : FF<"no-call-graph-profile-sort">, Alias<call_graph_profile_sort>, AliasArg
   Flags<[HelpHidden]>;
 
 def call_graph_section_sort: JJ<"call-graph-section-sort=">,
-  HelpText<"Reorder input sections using call graph metadata from .llvm.callgraph sections (default: cdsort)">,
+  HelpText<"Reorder input sections with the call graph reconstructed from .llvm.callgraph sections using the specified algorithm (default: none)">,
   MetaVarName<"[none,hfsort,cdsort]">,
   Values<"none,hfsort,cdsort">;
 def : FF<"call-graph-section-sort">, Alias<call_graph_section_sort>, AliasArgs<["cdsort"]>,
   HelpText<"Alias for --call-graph-section-sort=cdsort">;
 def : FF<"no-call-graph-section-sort">, Alias<call_graph_section_sort>, AliasArgs<["none"]>,
-  HelpText<"Alias for --call-graph-section-sort=none">;
+  Flags<[HelpHidden]>;
 
 defm irpgo_profile: EEq<"irpgo-profile",
   "Read a temporary profile file for use with --bp-startup-sort=">;
