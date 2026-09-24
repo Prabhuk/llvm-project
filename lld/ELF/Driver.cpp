@@ -1209,7 +1209,7 @@ template <class ELFT>
 static void addCallGraphSectionRoots(
     Ctx &ctx, llvm::callgraph::CallGraphBuilder &builder,
     function_ref<llvm::callgraph::NodeId(InputSectionBase *)> getOrCreateNode,
-    const DenseSet<const InputSectionBase *> &exportedFuncSections) {
+    const SetVector<const InputSectionBase *> &exportedFuncSections) {
   auto isLiveSection = [](InputSectionBase *sec) {
     return sec && sec != &InputSection::discarded && sec->isLive();
   };
@@ -1366,7 +1366,10 @@ static void readCallGraphFromCallGraphSection(Ctx &ctx) {
   // which are always STB_LOCAL even when the function itself is global, so a
   // section's effective linkage must be derived from all of its symbols.
   DenseSet<const InputSectionBase *> externalSections;
-  DenseSet<const InputSectionBase *> exportedFuncSections;
+  // Iterated below to create graph nodes, so it must keep insertion order:
+  // iterating a pointer-keyed set would make NodeIds, and thus the layout,
+  // depend on heap addresses.
+  SetVector<const InputSectionBase *> exportedFuncSections;
   DenseMap<const InputFile *, cg::ModuleId> fileToModule;
 
   cg::ModuleId nextModule = 1;
