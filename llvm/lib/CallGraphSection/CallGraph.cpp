@@ -185,6 +185,8 @@ CallGraph CallGraphBuilder::build() {
   }
 
   sortUnique(Roots);
+  if (UnknownCodeIsRoot)
+    Roots.push_back(UnknownCallee); // Pseudo nodes follow all functions.
   G.Nodes[G.externalCallingNode()].Callees.assign(Roots.begin(), Roots.end());
   G.Nodes[UnknownCallee].Callees.assign(AddressTaken.begin(),
                                         AddressTaken.end());

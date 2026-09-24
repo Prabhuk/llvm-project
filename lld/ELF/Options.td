@@ -155,6 +155,10 @@ def : FF<"call-graph-section">, Alias<call_graph_section>, AliasArgs<["auto"]>,
   HelpText<"Alias for --call-graph-section=auto">;
 def : FF<"no-call-graph-section">, Alias<call_graph_section>, AliasArgs<["none"]>,
   Flags<[HelpHidden]>;
+defm call_graph_section_cold_unreachable: BB<"call-graph-section-cold-unreachable",
+  "Place executable sections that the --call-graph-section call graph proves unreachable from the program's entry points "
+  "at the end of their output section, unless they are otherwise ordered",
+  "Do not move unreachable sections (default)">;
 
 defm irpgo_profile: EEq<"irpgo-profile",
   "Read a temporary profile file for use with --bp-startup-sort=">;

@@ -11,8 +11,13 @@
 
 namespace lld::elf {
 struct Ctx;
+class InputSectionBase;
 
 template <class ELFT> void markLive(Ctx &);
+
+// Returns true if \p sec is used directly by the loader and is therefore a
+// garbage collection root.
+bool isReserved(InputSectionBase *sec);
 }
 
 #endif // LLD_ELF_MARKLIVE_H

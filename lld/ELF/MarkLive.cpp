@@ -222,8 +222,8 @@ void MarkLive<ELFT, TrackWhyLive>::scanEhFrameSection(EhInputSection &eh) {
 
 // Some sections are used directly by the loader, so they should never be
 // garbage-collected. This function returns true if a given section is such
-// section.
-static bool isReserved(InputSectionBase *sec) {
+// section. It is also used by --call-graph-section to find reachability roots.
+bool elf::isReserved(InputSectionBase *sec) {
   switch (sec->type) {
   case SHT_FINI_ARRAY:
   case SHT_INIT_ARRAY:
