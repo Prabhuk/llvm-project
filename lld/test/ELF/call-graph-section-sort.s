@@ -3,20 +3,20 @@
 
 # RUN: llvm-mc -filetype=obj -triple=x86_64-unknown-linux single.s -o single.o
 
-## Default: without --call-graph-section-sort, sections are placed in input order.
+## Default: without --call-graph-section, sections are placed in input order.
 # RUN: ld.lld -e A single.o -o single1
 # RUN: llvm-nm -n single1 | FileCheck %s --check-prefix=NO-SORT
 
-## --no-call-graph-section-sort preserves input order.
-# RUN: ld.lld --no-call-graph-section-sort -e A single.o -o single2
+## --no-call-graph-section preserves input order.
+# RUN: ld.lld --no-call-graph-section -e A single.o -o single2
 # RUN: cmp single1 single2
 
-## --call-graph-section-sort=hfsort clusters direct and indirect callers/callees.
-# RUN: ld.lld --call-graph-section-sort=hfsort -e A single.o -o single3
+## --call-graph-section=only --call-graph-profile-sort=hfsort clusters direct and indirect callers/callees.
+# RUN: ld.lld --call-graph-section=only --call-graph-profile-sort=hfsort -e A single.o -o single3
 # RUN: llvm-nm -n single3 | FileCheck %s --check-prefix=SORTED
 
-## --call-graph-section-sort (defaults to cdsort) clusters sections.
-# RUN: ld.lld --call-graph-section-sort -e A single.o -o single4
+## --call-graph-section (auto; the sort algorithm defaults to cdsort) clusters sections.
+# RUN: ld.lld --call-graph-section -e A single.o -o single4
 # RUN: llvm-nm -n single4 | FileCheck %s --check-prefix=SORTED
 
 ## Multi-object test: cross-TU direct and indirect calls.
@@ -25,14 +25,14 @@
 # RUN: ld.lld -e caller multi-caller.o multi-callee.o -o multi-nosort
 # RUN: llvm-nm -n multi-nosort | FileCheck %s --check-prefix=MULTI-NOSORT
 
-# RUN: ld.lld --call-graph-section-sort -e caller multi-caller.o multi-callee.o -o multi-sorted
+# RUN: ld.lld --call-graph-section -e caller multi-caller.o multi-callee.o -o multi-sorted
 # RUN: llvm-nm -n multi-sorted | FileCheck %s --check-prefix=MULTI-SORTED
 
 ## STB_LOCAL scoping test: internal linkage helpers with identical TypeIDs
 ## (0x9999) in different TUs must only match callers within their own TU.
 # RUN: llvm-mc -filetype=obj -triple=x86_64-unknown-linux local-tu1.s -o local-tu1.o
 # RUN: llvm-mc -filetype=obj -triple=x86_64-unknown-linux local-tu2.s -o local-tu2.o
-# RUN: ld.lld --call-graph-section-sort -e caller_tu1 local-tu2.o local-tu1.o -o local-scoped
+# RUN: ld.lld --call-graph-section -e caller_tu1 local-tu2.o local-tu1.o -o local-scoped
 # RUN: llvm-nm -n local-scoped | FileCheck %s --check-prefix=LOCAL-SCOPED
 
 ## Escaped STB_LOCAL test: an internal linkage function whose address is stored
@@ -40,25 +40,25 @@
 ## must match indirect callers in other TUs.
 # RUN: llvm-mc -filetype=obj -triple=x86_64-unknown-linux escape-caller.s -o escape-caller.o
 # RUN: llvm-mc -filetype=obj -triple=x86_64-unknown-linux escape-callee.s -o escape-callee.o
-# RUN: ld.lld --call-graph-section-sort -e escape_caller escape-caller.o escape-callee.o -o escape-sorted
+# RUN: ld.lld --call-graph-section -e escape_caller escape-caller.o escape-callee.o -o escape-sorted
 # RUN: llvm-nm -n escape-sorted | FileCheck %s --check-prefix=ESCAPED-LOCAL
 
 ## STT_SECTION relocation test: relocations referencing section symbols
 ## (.text.sec_callee) with -ffunction-sections resolve to the section's
 ## effective binding and cluster properly.
 # RUN: llvm-mc -filetype=obj -triple=x86_64-unknown-linux section-sym.s -o section-sym.o
-# RUN: ld.lld --call-graph-section-sort -e sec_caller section-sym.o -o section-sym-sorted
+# RUN: ld.lld --call-graph-section -e sec_caller section-sym.o -o section-sym-sorted
 # RUN: llvm-nm -n section-sym-sorted | FileCheck %s --check-prefix=SEC-SYM
 
 ## Fan-out cap test: when an indirect TypeID (0xDEAD) matches > 64 targets (65),
 ## the unconstrained clique is dropped so direct call edges dominate placement.
 # RUN: llvm-mc -filetype=obj -triple=x86_64-unknown-linux fanout.s -o fanout.o
-# RUN: ld.lld --call-graph-section-sort -e fanout_caller fanout.o -o fanout-sorted
+# RUN: ld.lld --call-graph-section -e fanout_caller fanout.o -o fanout-sorted
 # RUN: llvm-nm -n fanout-sorted | FileCheck %s --check-prefix=FANOUT-CAP
 
 ## Invalid sort algorithm produces an error.
-# RUN: not ld.lld --call-graph-section-sort=foo -e A single.o -o /dev/null 2>&1 | FileCheck %s --check-prefix=ERR
-# ERR: error: unknown --call-graph-section-sort= value: foo
+# RUN: not ld.lld --call-graph-section=foo -e A single.o -o /dev/null 2>&1 | FileCheck %s --check-prefix=ERR
+# ERR: error: unknown --call-graph-section= value: foo
 
 # NO-SORT:      {{[0-9a-f]+}} T D
 # NO-SORT-NEXT: {{[0-9a-f]+}} T C

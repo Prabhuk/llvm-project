@@ -102,6 +102,16 @@ enum class BuildIdKind { None, Fast, Md5, Sha1, Hexstring, Uuid };
 // For --call-graph-profile-sort={none,hfsort,cdsort}.
 enum class CGProfileSortKind { None, Hfsort, Cdsort };
 
+// For --call-graph-section={none,auto,only}. Selects whether the call graph
+// reconstructed from SHT_LLVM_CALL_GRAPH sections is used as an edge source for
+// --call-graph-profile-sort. The sort algorithm is selected independently.
+//  - None: ignore SHT_LLVM_CALL_GRAPH sections.
+//  - Auto: lay out sections covered by a measured profile exactly as without
+//          this option, then lay out the remaining sections using the static
+//          call graph.
+//  - Only: ignore any measured profile and use only the static call graph.
+enum class CallGraphSectionMode { None, Auto, Only };
+
 // For --discard-{all,locals,none}.
 enum class DiscardPolicy { Default, All, Locals, None };
 
@@ -319,6 +329,12 @@ struct Config {
   llvm::MapVector<std::pair<const InputSectionBase *, const InputSectionBase *>,
                   uint64_t>
       callGraphProfile;
+  // Edges derived from SHT_LLVM_CALL_GRAPH sections (--call-graph-section).
+  // Kept separate from the measured callGraphProfile so that the measured
+  // layout tier is computed from exactly the same input as without the option.
+  llvm::MapVector<std::pair<const InputSectionBase *, const InputSectionBase *>,
+                  uint64_t>
+      callGraphSectionProfile;
   bool cmseImplib = false;
   bool allowMultipleDefinition;
   bool fatLTOObjects;
@@ -333,7 +349,7 @@ struct Config {
   bool armBe8 = false;
   BsymbolicKind bsymbolic = BsymbolicKind::None;
   CGProfileSortKind callGraphProfileSort;
-  CGProfileSortKind callGraphSectionSort = CGProfileSortKind::None;
+  CallGraphSectionMode callGraphSection = CallGraphSectionMode::None;
   llvm::StringRef irpgoProfilePath;
   bool bpStartupFunctionSort = false;
   bool bpCompressionSortStartupFunctions = false;

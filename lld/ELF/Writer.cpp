@@ -1081,7 +1081,11 @@ static void maybeShuffle(Ctx &ctx,
 // If both --symbol-ordering-file and call graph profile are present, the order
 // file takes precedence, but the call graph profile is still used for symbols
 // that don't appear in the order file.
-static DenseMap<const InputSectionBase *, int> buildSectionOrder(Ctx &ctx) {
+//
+// Sections ordered only by the static call graph tier (--call-graph-section)
+// are added to \p secondary; see sortISDBySectionOrder.
+static DenseMap<const InputSectionBase *, int>
+buildSectionOrder(Ctx &ctx, DenseSet<const InputSectionBase *> &secondary) {
   DenseMap<const InputSectionBase *, int> sectionOrder;
   if (ctx.arg.bpStartupFunctionSort || ctx.arg.bpFunctionOrderForCompression ||
       ctx.arg.bpDataOrderForCompression ||
@@ -1093,8 +1097,9 @@ static DenseMap<const InputSectionBase *, int> buildSectionOrder(Ctx &ctx) {
         ctx.arg.bpDataOrderForCompression,
         ctx.arg.bpCompressionSortStartupFunctions,
         ctx.arg.bpVerboseSectionOrderer);
-  } else if (!ctx.arg.callGraphProfile.empty()) {
-    sectionOrder = computeCallGraphProfileOrder(ctx);
+  } else if (!ctx.arg.callGraphProfile.empty() ||
+             !ctx.arg.callGraphSectionProfile.empty()) {
+    sectionOrder = computeCallGraphProfileOrder(ctx, secondary);
   }
 
   if (ctx.arg.symbolOrderingFile.empty())
@@ -1127,6 +1132,9 @@ static DenseMap<const InputSectionBase *, int> buildSectionOrder(Ctx &ctx) {
       if (auto *sec = dyn_cast_or_null<InputSectionBase>(d->section)) {
         int &priority = sectionOrder[cast<InputSectionBase>(sec)];
         priority = std::min(priority, ent.priority);
+        // The symbol ordering file takes precedence over the static call
+        // graph tier.
+        secondary.erase(sec);
       }
     }
   };
@@ -1150,10 +1158,29 @@ static DenseMap<const InputSectionBase *, int> buildSectionOrder(Ctx &ctx) {
 }
 
 // Sorts the sections in ISD according to the provided section order.
+//
+// Sections in \p secondary (the static call graph tier of
+// --call-graph-section=auto) are ordered, but must not perturb the placement
+// of the primary ordered sections. When the ISD has primary ordered sections,
+// secondary sections are treated as unordered for the purpose of choosing the
+// insertion point below, which is therefore identical to the one chosen
+// without --call-graph-section. Secondary sections that fall after the
+// insertion point are then sorted and placed immediately after the primary
+// block; those before it keep their input order so that the primary block's
+// offset is unchanged.
 static void
 sortISDBySectionOrder(Ctx &ctx, InputSectionDescription *isd,
                       const DenseMap<const InputSectionBase *, int> &order,
+                      const DenseSet<const InputSectionBase *> &secondary,
                       bool executableOutputSection) {
+  bool hasPrimary = llvm::any_of(isd->sections, [&](InputSection *isec) {
+    return order.contains(isec) && !secondary.contains(isec);
+  });
+  auto isSecondary = [&](InputSection *isec) {
+    return hasPrimary && secondary.contains(isec);
+  };
+
+  // unorderedSections also holds secondary sections, in input order.
   SmallVector<InputSection *, 0> unorderedSections;
   SmallVector<std::pair<InputSection *, int>, 0> orderedSections;
   uint64_t unorderedSize = 0;
@@ -1163,7 +1190,7 @@ sortISDBySectionOrder(Ctx &ctx, InputSectionDescription *isd,
     if (executableOutputSection)
       totalSize += isec->getSize();
     auto i = order.find(isec);
-    if (i == order.end()) {
+    if (i == order.end() || isSecondary(isec)) {
       unorderedSections.push_back(isec);
       unorderedSize += isec->getSize();
       continue;
@@ -1216,17 +1243,28 @@ sortISDBySectionOrder(Ctx &ctx, InputSectionDescription *isd,
     }
   }
 
+  // Secondary sections after the insertion point, in their sorted order.
+  SmallVector<std::pair<InputSection *, int>, 0> secondarySections;
+  for (InputSection *isec : ArrayRef(unorderedSections).slice(insPt))
+    if (isSecondary(isec))
+      secondarySections.push_back({isec, order.lookup(isec)});
+  llvm::sort(secondarySections, llvm::less_second());
+
   isd->sections.clear();
   for (InputSection *isec : ArrayRef(unorderedSections).slice(0, insPt))
     isd->sections.push_back(isec);
   for (std::pair<InputSection *, int> p : orderedSections)
     isd->sections.push_back(p.first);
+  for (std::pair<InputSection *, int> p : secondarySections)
+    isd->sections.push_back(p.first);
   for (InputSection *isec : ArrayRef(unorderedSections).slice(insPt))
-    isd->sections.push_back(isec);
+    if (!isSecondary(isec))
+      isd->sections.push_back(isec);
 }
 
 static void sortSection(Ctx &ctx, OutputSection &osec,
-                        const DenseMap<const InputSectionBase *, int> &order) {
+                        const DenseMap<const InputSectionBase *, int> &order,
+                        const DenseSet<const InputSectionBase *> &secondary) {
   StringRef name = osec.name;
 
   // Never sort these.
@@ -1240,7 +1278,8 @@ static void sortSection(Ctx &ctx, OutputSection &osec,
   if (!order.empty())
     for (SectionCommand *b : osec.commands)
       if (auto *isd = dyn_cast<InputSectionDescription>(b))
-        sortISDBySectionOrder(ctx, isd, order, osec.flags & SHF_EXECINSTR);
+        sortISDBySectionOrder(ctx, isd, order, secondary,
+                              osec.flags & SHF_EXECINSTR);
 
   if (ctx.script->hasSectionsCommand)
     return;
@@ -1268,12 +1307,14 @@ static void sortSection(Ctx &ctx, OutputSection &osec,
 // Sort sections within each InputSectionDescription.
 template <class ELFT> void Writer<ELFT>::sortInputSections() {
   // Assign negative priorities.
-  DenseMap<const InputSectionBase *, int> order = buildSectionOrder(ctx);
+  DenseSet<const InputSectionBase *> secondary;
+  DenseMap<const InputSectionBase *, int> order =
+      buildSectionOrder(ctx, secondary);
   // Assign non-negative priorities due to --shuffle-sections.
   maybeShuffle(ctx, order);
   for (SectionCommand *cmd : ctx.script->sectionCommands)
     if (auto *osd = dyn_cast<OutputDesc>(cmd))
-      sortSection(ctx, osd->osec, order);
+      sortSection(ctx, osd->osec, order, secondary);
 }
 
 template <class ELFT> void Writer<ELFT>::sortSections() {

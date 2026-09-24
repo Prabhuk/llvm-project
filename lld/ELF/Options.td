@@ -145,13 +145,15 @@ def call_graph_profile_sort: JJ<"call-graph-profile-sort=">,
 def : FF<"no-call-graph-profile-sort">, Alias<call_graph_profile_sort>, AliasArgs<["none"]>,
   Flags<[HelpHidden]>;
 
-def call_graph_section_sort: JJ<"call-graph-section-sort=">,
-  HelpText<"Reorder input sections with the call graph reconstructed from .llvm.callgraph sections using the specified algorithm (default: none)">,
-  MetaVarName<"[none,hfsort,cdsort]">,
-  Values<"none,hfsort,cdsort">;
-def : FF<"call-graph-section-sort">, Alias<call_graph_section_sort>, AliasArgs<["cdsort"]>,
-  HelpText<"Alias for --call-graph-section-sort=cdsort">;
-def : FF<"no-call-graph-section-sort">, Alias<call_graph_section_sort>, AliasArgs<["none"]>,
+def call_graph_section: JJ<"call-graph-section=">,
+  HelpText<"Use the call graph reconstructed from .llvm.callgraph sections as an edge source for --call-graph-profile-sort. "
+           "auto: sections covered by a measured profile keep their layout and the remaining sections are laid out using the static call graph; "
+           "only: use only the static call graph (default: none)">,
+  MetaVarName<"[none,auto,only]">,
+  Values<"none,auto,only">;
+def : FF<"call-graph-section">, Alias<call_graph_section>, AliasArgs<["auto"]>,
+  HelpText<"Alias for --call-graph-section=auto">;
+def : FF<"no-call-graph-section">, Alias<call_graph_section>, AliasArgs<["none"]>,
   Flags<[HelpHidden]>;
 
 defm irpgo_profile: EEq<"irpgo-profile",

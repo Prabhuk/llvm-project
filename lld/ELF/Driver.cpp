@@ -1189,7 +1189,7 @@ static bool isDirectBranchRelocation(uint16_t machine, uint32_t type) {
 }
 
 // Reconstruct a whole-program call graph from SHT_LLVM_CALL_GRAPH sections
-// and use it to populate ctx.arg.callGraphProfile.
+// and use it to populate ctx.arg.callGraphSectionProfile.
 //
 // LLD's role is to supply facts only the linker can establish -- module
 // membership, effective linkage, address-taken evidence from relocations, and
@@ -1376,7 +1376,7 @@ static void readCallGraphFromCallGraphSection(Ctx &ctx) {
     InputSectionBase *from = nodeToSection[edge.From];
     InputSectionBase *to = nodeToSection[edge.To];
     if (from->isLive() && to->isLive())
-      ctx.arg.callGraphProfile[{from, to}] += edge.Weight;
+      ctx.arg.callGraphSectionProfile[{from, to}] += edge.Weight;
   }
 }
 
@@ -1455,16 +1455,16 @@ static CGProfileSortKind getCGProfileSortKind(Ctx &ctx,
   return CGProfileSortKind::None;
 }
 
-static CGProfileSortKind getCGSectionSortKind(Ctx &ctx,
-                                              opt::InputArgList &args) {
-  StringRef s = args.getLastArgValue(OPT_call_graph_section_sort, "none");
-  if (s == "hfsort")
-    return CGProfileSortKind::Hfsort;
-  if (s == "cdsort")
-    return CGProfileSortKind::Cdsort;
+static CallGraphSectionMode getCallGraphSectionMode(Ctx &ctx,
+                                                    opt::InputArgList &args) {
+  StringRef s = args.getLastArgValue(OPT_call_graph_section, "none");
+  if (s == "auto")
+    return CallGraphSectionMode::Auto;
+  if (s == "only")
+    return CallGraphSectionMode::Only;
   if (s != "none")
-    ErrAlways(ctx) << "unknown --call-graph-section-sort= value: " << s;
-  return CGProfileSortKind::None;
+    ErrAlways(ctx) << "unknown --call-graph-section= value: " << s;
+  return CallGraphSectionMode::None;
 }
 
 static void parseBPOrdererOptions(Ctx &ctx, opt::InputArgList &args) {
@@ -1698,7 +1698,7 @@ static void readConfigs(Ctx &ctx, opt::InputArgList &args) {
       ctx.arg.bsymbolic = BsymbolicKind::All;
   }
   ctx.arg.callGraphProfileSort = getCGProfileSortKind(ctx, args);
-  ctx.arg.callGraphSectionSort = getCGSectionSortKind(ctx, args);
+  ctx.arg.callGraphSection = getCallGraphSectionMode(ctx, args);
   parseBPOrdererOptions(ctx, args);
   ctx.arg.checkSections =
       args.hasFlag(OPT_check_sections, OPT_no_check_sections, true);
@@ -3876,21 +3876,24 @@ template <class ELFT> void LinkerDriver::link(opt::InputArgList &args) {
     doIcf<ELFT>(ctx);
   }
 
-  // Read the callgraph now that we know what was gced or icfed
-  if (ctx.arg.callGraphProfileSort != CGProfileSortKind::None ||
-      ctx.arg.callGraphSectionSort != CGProfileSortKind::None) {
-    if (auto *arg = args.getLastArg(OPT_call_graph_ordering_file)) {
-      if (std::optional<MemoryBufferRef> buffer =
-              readFile(ctx, arg->getValue()))
-        readCallGraph(ctx, *buffer);
-    } else {
-      if (ctx.arg.callGraphSectionSort != CGProfileSortKind::None) {
-        ctx.arg.callGraphProfile.clear();
-        readCallGraphFromCallGraphSection<ELFT>(ctx);
-      } else if (ctx.arg.callGraphProfileSort != CGProfileSortKind::None) {
+  // Read the callgraph now that we know what was gced or icfed. Measured
+  // profile edges and static SHT_LLVM_CALL_GRAPH edges are kept in separate
+  // maps; computeCallGraphProfileOrder decides how they are combined.
+  if (ctx.arg.callGraphProfileSort != CGProfileSortKind::None) {
+    if (ctx.arg.callGraphSection != CallGraphSectionMode::Only) {
+      if (auto *arg = args.getLastArg(OPT_call_graph_ordering_file)) {
+        if (std::optional<MemoryBufferRef> buffer =
+                readFile(ctx, arg->getValue()))
+          readCallGraph(ctx, *buffer);
+      } else {
         readCallGraphsFromObjectFiles<ELFT>(ctx);
       }
+    } else if (args.hasArg(OPT_call_graph_ordering_file)) {
+      Warn(ctx) << "--call-graph-ordering-file is ignored with "
+                   "--call-graph-section=only";
     }
+    if (ctx.arg.callGraphSection != CallGraphSectionMode::None)
+      readCallGraphFromCallGraphSection<ELFT>(ctx);
   }
 
   // Write the result to the file.
