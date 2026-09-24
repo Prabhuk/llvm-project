@@ -4,7 +4,6 @@ add_llvm_component_library(LLVMObject
   BBAddrMap.cpp
   Binary.cpp
   BuildID.cpp
-  CallGraphSection.cpp
   COFFImportFile.cpp
   COFFModuleDefinition.cpp
   COFFObjectFile.cpp
