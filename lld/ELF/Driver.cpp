@@ -48,15 +48,16 @@
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringSwitch.h"
+#include "llvm/CallGraphSection/CallGraph.h"
+#include "llvm/CallGraphSection/LayoutWeights.h"
+#include "llvm/CallGraphSection/RecordReader.h"
 #include "llvm/Config/llvm-config.h"
 #include "llvm/LTO/LTO.h"
 #include "llvm/Object/Archive.h"
-#include "llvm/Object/CallGraphSection.h"
 #include "llvm/Object/IRObjectFile.h"
 #include "llvm/Remarks/HotnessThresholdParser.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Compression.h"
-#include "llvm/Support/DataExtractor.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/GlobPattern.h"
 #include "llvm/Support/LEB128.h"
@@ -1102,240 +1103,212 @@ template <class ELFT> static void readCallGraphsFromObjectFiles(Ctx &ctx) {
   }
 }
 
-template <class ELFT> static void ReadCallGraphFromCallGraphSection(Ctx &Ctx) {
-  using namespace llvm::object;
+// Returns true if the relocation at \p offset in an x86-64 code section is the
+// operand of a direct CALL/JMP/Jcc, i.e. a call rather than an address-take.
+//
+// FIXME: This inspects the preceding opcode bytes, which is a heuristic on a
+// variable-length ISA and is x86-64 specific. Classify by relocation type
+// instead so that the analysis is sound and target independent.
+static bool isX86_64DirectBranch(ArrayRef<uint8_t> data, uint64_t offset) {
+  if (offset < 1 || offset > data.size())
+    return false;
+  uint8_t op = data[offset - 1];
+  // E8: CALL rel32, E9: JMP rel32, EB: JMP rel8.
+  if (op == 0xE8 || op == 0xE9 || op == 0xEB)
+    return true;
+  // 0F 80..8F: Jcc rel32.
+  return offset >= 2 && data[offset - 2] == 0x0F && (op & 0xF0) == 0x80;
+}
 
-  // Phase 1: Classify ELF sections and symbols across all input object files.
-  // Note that in ELF (-ffunction-sections), relocations frequently target
-  // section symbols (STT_SECTION) which always carry STB_LOCAL binding in
-  // .symtab even when the underlying function has STB_GLOBAL/STB_WEAK binding.
-  // We inspect Obj->getSymbols() to determine each section's true effective
-  // linkage and to verify executable function status.
-  DenseSet<const InputSectionBase *> ExternalSections;
-  DenseSet<const InputSectionBase *> ExportedFuncSections;
-  DenseMap<const InputFile *, uint32_t> ObjectToTUId;
+// Reconstruct a whole-program call graph from SHT_LLVM_CALL_GRAPH sections
+// and use it to populate ctx.arg.callGraphProfile.
+//
+// LLD's role is to supply facts only the linker can establish -- module
+// membership, effective linkage, address-taken evidence from relocations, and
+// relocation-based resolution of the address fields in each record. Decoding,
+// graph reconstruction and edge weighting are delegated to
+// llvm/CallGraphSection so that other consumers (BOLT, offline tools) share
+// the same implementation.
+template <class ELFT>
+static void readCallGraphFromCallGraphSection(Ctx &ctx) {
+  namespace cg = llvm::callgraph;
 
-  uint32_t NextTUId = 1;
-  for (ELFFileBase *File : Ctx.objectFiles) {
-    ObjectToTUId[File] = NextTUId++;
-    auto *Obj = cast<ObjFile<ELFT>>(File);
-    for (Symbol *Sym : Obj->getSymbols()) {
-      if (!Sym)
+  // Step 1: Classify sections by the symbols that define them. With
+  // -ffunction-sections, relocations frequently target STT_SECTION symbols,
+  // which are always STB_LOCAL even when the function itself is global, so a
+  // section's effective linkage must be derived from all of its symbols.
+  DenseSet<const InputSectionBase *> externalSections;
+  DenseSet<const InputSectionBase *> exportedFuncSections;
+  DenseMap<const InputFile *, cg::ModuleId> fileToModule;
+
+  cg::ModuleId nextModule = 1;
+  for (ELFFileBase *file : ctx.objectFiles) {
+    fileToModule[file] = nextModule++;
+    auto *obj = cast<ObjFile<ELFT>>(file);
+    for (Symbol *sym : obj->getSymbols()) {
+      if (!sym)
         continue;
-      auto *Def = dyn_cast<Defined>(Sym);
-      if (!Def || !Def->section)
+      auto *def = dyn_cast<Defined>(sym);
+      if (!def || !def->section)
         continue;
-      auto *ISec = dyn_cast<InputSectionBase>(Def->section);
-      if (!ISec || ISec == &InputSection::discarded || !ISec->isLive())
+      auto *isec = dyn_cast<InputSectionBase>(def->section);
+      if (!isec || isec == &InputSection::discarded || !isec->isLive())
         continue;
 
-      if (!Sym->isLocal())
-        ExternalSections.insert(ISec);
+      if (!sym->isLocal())
+        externalSections.insert(isec);
 
-      if ((ISec->flags & ELF::SHF_EXECINSTR) != 0) {
-        if (Sym->isSection() || Sym->type == ELF::STT_FUNC ||
-            Sym->type == ELF::STT_NOTYPE || Sym->type == ELF::STT_GNU_IFUNC) {
-          if (Sym->isExported || (Ctx.arg.shared && !Sym->isLocal() &&
-                                  Sym->visibility() == ELF::STV_DEFAULT))
-            ExportedFuncSections.insert(ISec);
-        }
-      }
+      if ((isec->flags & SHF_EXECINSTR) &&
+          (sym->isSection() || sym->type == STT_FUNC ||
+           sym->type == STT_NOTYPE || sym->type == STT_GNU_IFUNC) &&
+          (sym->isExported || (ctx.arg.shared && !sym->isLocal() &&
+                               sym->visibility() == STV_DEFAULT)))
+        exportedFuncSections.insert(isec);
     }
   }
 
-  CallGraphSectionReconstructor Reconstructor;
-  DenseMap<const InputSectionBase *, uint32_t> SectionToNodeId;
-  SmallVector<InputSectionBase *, 0> NodeIdToSection;
+  cg::CallGraphBuilder builder;
+  DenseMap<const InputSectionBase *, cg::NodeId> sectionToNode;
+  SmallVector<InputSectionBase *, 0> nodeToSection;
 
-  auto GetOrCreateNodeId = [&](InputSectionBase *ISec) -> uint32_t {
-    auto It = SectionToNodeId.find(ISec);
-    if (It != SectionToNodeId.end())
-      return It->second;
-
-    CallGraphFunctionNode Node;
-    Node.TranslationUnitId = ObjectToTUId.lookup(ISec->file);
-    Node.IsExternalLinkage = ExternalSections.contains(ISec);
-    Node.IsExecutable = (ISec->flags & ELF::SHF_EXECINSTR) != 0;
-    uint32_t NodeId = Reconstructor.AddFunctionNode(std::move(Node));
-    SectionToNodeId[ISec] = NodeId;
-    NodeIdToSection.push_back(ISec);
-    return NodeId;
+  auto getOrCreateNode = [&](InputSectionBase *isec) -> cg::NodeId {
+    auto [it, inserted] = sectionToNode.try_emplace(isec, cg::InvalidNodeId);
+    if (!inserted)
+      return it->second;
+    cg::FunctionNode node;
+    node.Module = fileToModule.lookup(isec->file);
+    node.IsExternal = externalSections.contains(isec);
+    node.IsExecutable = (isec->flags & SHF_EXECINSTR) != 0;
+    it->second = builder.addFunction(std::move(node));
+    nodeToSection.push_back(isec);
+    return it->second;
   };
 
-  auto ResolveCallableSection = [&](ObjFile<ELFT> *Obj,
-                                    uint32_t SymIdx) -> InputSectionBase * {
-    Symbol &Sym = Obj->getSymbol(SymIdx);
-    auto *Def = dyn_cast<Defined>(&Sym);
-    if (!Def || !Def->section)
+  auto resolveCallableSection = [&](ObjFile<ELFT> *obj,
+                                    uint32_t symIndex) -> InputSectionBase * {
+    Symbol &sym = obj->getSymbol(symIndex);
+    auto *def = dyn_cast<Defined>(&sym);
+    if (!def || !def->section)
       return nullptr;
-    if (!Sym.isSection() && Sym.type != ELF::STT_FUNC &&
-        Sym.type != ELF::STT_NOTYPE && Sym.type != ELF::STT_GNU_IFUNC)
+    if (!sym.isSection() && sym.type != STT_FUNC && sym.type != STT_NOTYPE &&
+        sym.type != STT_GNU_IFUNC)
       return nullptr;
-    auto *ISec = dyn_cast<InputSectionBase>(Def->section);
-    if (!ISec || ISec == &InputSection::discarded || !ISec->isLive())
+    auto *isec = dyn_cast<InputSectionBase>(def->section);
+    if (!isec || isec == &InputSection::discarded || !isec->isLive() ||
+        !(isec->flags & SHF_EXECINSTR))
       return nullptr;
-    if ((ISec->flags & ELF::SHF_EXECINSTR) == 0)
-      return nullptr;
-    return ISec;
+    return isec;
   };
 
-  // Phase 2: Whole-Program Link-Time Address-Taken & Escape Verification.
-  for (const InputSectionBase *ISec : ExportedFuncSections) {
-    uint32_t NodeId = GetOrCreateNodeId(const_cast<InputSectionBase *>(ISec));
-    Reconstructor.AddAddressTakenFact(NodeId, ObjectToTUId.lookup(ISec->file),
-                                      /*IsGlobalEscape=*/true);
-  }
+  // Step 2: Whole-program address-taken evidence. Exported functions may be
+  // called through a pointer obtained outside this link.
+  for (const InputSectionBase *isec : exportedFuncSections)
+    builder.addAddressTakenFact(
+        getOrCreateNode(const_cast<InputSectionBase *>(isec)),
+        fileToModule.lookup(isec->file), /*IsGlobalEscape=*/true);
 
-  for (ELFFileBase *File : Ctx.objectFiles) {
-    auto *Obj = cast<ObjFile<ELFT>>(File);
-    uint32_t SourceTUId = ObjectToTUId.lookup(Obj);
-    for (InputSectionBase *RefSec : Obj->getSections()) {
-      if (!RefSec || RefSec == &InputSection::discarded || !RefSec->isLive())
+  for (ELFFileBase *file : ctx.objectFiles) {
+    auto *obj = cast<ObjFile<ELFT>>(file);
+    cg::ModuleId sourceModule = fileToModule.lookup(obj);
+    for (InputSectionBase *refSec : obj->getSections()) {
+      if (!refSec || refSec == &InputSection::discarded || !refSec->isLive())
         continue;
-      if ((RefSec->flags & ELF::SHF_ALLOC) == 0 ||
-          RefSec->type == ELF::SHT_LLVM_CALL_GRAPH ||
-          RefSec->name == ".eh_frame" ||
-          RefSec->name.starts_with(".gcc_except_table"))
+      if (!(refSec->flags & SHF_ALLOC) ||
+          refSec->type == SHT_LLVM_CALL_GRAPH || refSec->name == ".eh_frame" ||
+          refSec->name.starts_with(".gcc_except_table"))
         continue;
 
-      bool IsRefCode = (RefSec->flags & ELF::SHF_EXECINSTR) != 0;
-      bool IsRefExternal = ExternalSections.contains(RefSec);
-      ArrayRef<uint8_t> SecData =
-          IsRefCode ? RefSec->content() : ArrayRef<uint8_t>();
+      bool isRefCode = (refSec->flags & SHF_EXECINSTR) != 0;
+      bool isRefExternal = externalSections.contains(refSec);
+      ArrayRef<uint8_t> secData =
+          isRefCode ? refSec->content() : ArrayRef<uint8_t>();
 
-      auto ProcessReloc = [&](uint64_t Offset, uint32_t SymIdx) {
-        InputSectionBase *TargetSec = ResolveCallableSection(Obj, SymIdx);
-        if (!TargetSec)
+      auto processReloc = [&](uint64_t offset, uint32_t symIndex) {
+        InputSectionBase *target = resolveCallableSection(obj, symIndex);
+        if (!target)
+          return;
+        if (isRefCode && ctx.arg.emachine == EM_X86_64 &&
+            isX86_64DirectBranch(secData, offset))
           return;
 
-        if (IsRefCode && Ctx.arg.emachine == ELF::EM_X86_64 &&
-            CallGraphSectionReconstructor::IsX86_64DirectBranchInstruction(
-                SecData, Offset))
-          return;
-
-        uint32_t TargetNodeId = GetOrCreateNodeId(TargetSec);
-        auto *TargetObj = dyn_cast_or_null<ObjFile<ELFT>>(TargetSec->file);
-        bool TargetIsLocal = !ExternalSections.contains(TargetSec);
-        bool IsGlobalEscape =
-            (TargetObj != Obj || IsRefExternal || IsRefCode || !TargetIsLocal);
-        Reconstructor.AddAddressTakenFact(TargetNodeId, SourceTUId,
-                                          IsGlobalEscape);
+        bool targetIsLocal = !externalSections.contains(target);
+        bool isGlobalEscape = target->file != obj || isRefExternal ||
+                              isRefCode || !targetIsLocal;
+        builder.addAddressTakenFact(getOrCreateNode(target), sourceModule,
+                                    isGlobalEscape);
       };
 
-      const RelsOrRelas<ELFT> Rels =
-          RefSec->template relsOrRelas<ELFT>(/*supportsCrel=*/false);
-      for (const typename ELFT::Rela &Rel : Rels.relas)
-        ProcessReloc(Rel.r_offset, Rel.getSymbol(Ctx.arg.isMips64EL));
-      for (const typename ELFT::Rel &Rel : Rels.rels)
-        ProcessReloc(Rel.r_offset, Rel.getSymbol(Ctx.arg.isMips64EL));
+      const RelsOrRelas<ELFT> rels =
+          refSec->template relsOrRelas<ELFT>(/*supportsCrel=*/false);
+      for (const typename ELFT::Rela &rel : rels.relas)
+        processReloc(rel.r_offset, rel.getSymbol(ctx.arg.isMips64EL));
+      for (const typename ELFT::Rel &rel : rels.rels)
+        processReloc(rel.r_offset, rel.getSymbol(ctx.arg.isMips64EL));
     }
   }
 
-  // Phase 3: Parse SHT_LLVM_CALL_GRAPH sections into
-  // CallGraphSectionReconstructor.
-  for (ELFFileBase *File : Ctx.objectFiles) {
-    auto *Obj = cast<ObjFile<ELFT>>(File);
-    for (InputSectionBase *ISec : Obj->getSections()) {
-      if (!ISec || ISec == &InputSection::discarded ||
-          ISec->type != ELF::SHT_LLVM_CALL_GRAPH || !ISec->isLive())
+  // Step 3: Decode SHT_LLVM_CALL_GRAPH records. Address fields are resolved
+  // through the section's relocations.
+  for (ELFFileBase *file : ctx.objectFiles) {
+    auto *obj = cast<ObjFile<ELFT>>(file);
+    for (InputSectionBase *isec : obj->getSections()) {
+      if (!isec || isec == &InputSection::discarded ||
+          isec->type != SHT_LLVM_CALL_GRAPH || !isec->isLive())
         continue;
 
-      DenseMap<uint64_t, uint32_t> OffsetToSym;
-      const RelsOrRelas<ELFT> Rels =
-          ISec->template relsOrRelas<ELFT>(/*supportsCrel=*/false);
-      for (const typename ELFT::Rela &Rel : Rels.relas)
-        OffsetToSym[Rel.r_offset] = Rel.getSymbol(Ctx.arg.isMips64EL);
-      for (const typename ELFT::Rel &Rel : Rels.rels)
-        OffsetToSym[Rel.r_offset] = Rel.getSymbol(Ctx.arg.isMips64EL);
+      DenseMap<uint64_t, uint32_t> offsetToSym;
+      const RelsOrRelas<ELFT> rels =
+          isec->template relsOrRelas<ELFT>(/*supportsCrel=*/false);
+      for (const typename ELFT::Rela &rel : rels.relas)
+        offsetToSym[rel.r_offset] = rel.getSymbol(ctx.arg.isMips64EL);
+      for (const typename ELFT::Rel &rel : rels.rels)
+        offsetToSym[rel.r_offset] = rel.getSymbol(ctx.arg.isMips64EL);
 
-      ArrayRef<uint8_t> Contents = ISec->content();
-      DataExtractor Data(Contents, Ctx.arg.isLE);
-      DataExtractor::Cursor C(0);
+      auto resolveAt = [&](uint64_t offset) -> InputSectionBase * {
+        auto it = offsetToSym.find(offset);
+        return it == offsetToSym.end() ? nullptr
+                                       : resolveCallableSection(obj, it->second);
+      };
 
-      while (C && C.tell() < ISec->size) {
-        uint8_t FormatVersion = Data.getU8(C);
-        if (!C)
-          break;
-        if (FormatVersion != CallGraphSectionFormat::FormatVersion) {
-          Warn(Ctx) << ISec << ": unknown format version ["
-                    << (unsigned)FormatVersion
-                    << "] in SHT_LLVM_CALL_GRAPH section";
+      cg::RecordReader reader(isec->content(), ctx.arg.isLE,
+                              sizeof(typename ELFT::uint));
+      cg::FunctionRecord record;
+      while (!reader.atEnd()) {
+        if (Error e = reader.readRecord(record)) {
+          Warn(ctx) << isec << ": " << std::move(e);
           break;
         }
 
-        uint8_t FlagsVal = Data.getU8(C);
-        if (!C)
-          break;
-
-        bool IsIndirectTarget =
-            (FlagsVal & CallGraphSectionFormat::FlagIsIndirectTarget) != 0;
-        bool HasDirectCallees =
-            (FlagsVal & CallGraphSectionFormat::FlagHasDirectCallees) != 0;
-        bool HasIndirectCallees =
-            (FlagsVal & CallGraphSectionFormat::FlagHasIndirectCallees) != 0;
-
-        uint64_t FuncAddrOffset = C.tell();
-        Data.getUnsigned(C, sizeof(typename ELFT::uint));
-        uint64_t FuncTypeID = Data.getU64(C);
-        if (!C)
-          break;
-
-        InputSectionBase *CallerSec = nullptr;
-        auto CallerIt = OffsetToSym.find(FuncAddrOffset);
-        if (CallerIt != OffsetToSym.end())
-          CallerSec = ResolveCallableSection(Obj, CallerIt->second);
-
-        SmallVector<uint32_t, 4> DirectCalleeNodeIds;
-        if (HasDirectCallees) {
-          uint64_t NumDirectCallees = Data.getULEB128(C);
-          for (uint64_t I = 0; I < NumDirectCallees && C; ++I) {
-            uint64_t CalleeOffset = C.tell();
-            Data.getUnsigned(C, sizeof(typename ELFT::uint));
-            auto CalleeIt = OffsetToSym.find(CalleeOffset);
-            if (CalleeIt != OffsetToSym.end()) {
-              if (InputSectionBase *CalleeSec =
-                      ResolveCallableSection(Obj, CalleeIt->second)) {
-                if (CalleeSec != CallerSec)
-                  DirectCalleeNodeIds.push_back(GetOrCreateNodeId(CalleeSec));
-              }
-            }
-          }
-        }
-
-        SmallVector<uint64_t, 4> IndirectTypeIDs;
-        if (HasIndirectCallees) {
-          uint64_t NumIndirectTargetTypeIDs = Data.getULEB128(C);
-          for (uint64_t I = 0; I < NumIndirectTargetTypeIDs && C; ++I)
-            IndirectTypeIDs.push_back(Data.getU64(C));
-        }
-
-        if (!CallerSec)
+        InputSectionBase *callerSec = resolveAt(record.FunctionAddressOffset);
+        if (!callerSec)
           continue;
 
-        uint32_t CallerNodeId = GetOrCreateNodeId(CallerSec);
-        CallGraphFunctionNode &CallerNode =
-            Reconstructor.GetFunctionNode(CallerNodeId);
-        if (IsIndirectTarget && FuncTypeID != 0) {
-          CallerNode.IsIndirectTarget = true;
-          CallerNode.FunctionTypeId = FuncTypeID;
+        cg::NodeId caller = getOrCreateNode(callerSec);
+        SmallVector<cg::NodeId, 4> callees;
+        for (uint64_t offset : record.DirectCalleeAddressOffsets)
+          if (InputSectionBase *calleeSec = resolveAt(offset))
+            callees.push_back(getOrCreateNode(calleeSec));
+
+        // getOrCreateNode may grow the builder, so take the reference last.
+        cg::FunctionNode &node = builder.getFunction(caller);
+        if (record.isIndirectTarget() && record.FunctionTypeId != 0) {
+          node.IsIndirectTarget = true;
+          node.TypeId = record.FunctionTypeId;
         }
-        CallerNode.DirectCalleeNodeIds.append(DirectCalleeNodeIds.begin(),
-                                              DirectCalleeNodeIds.end());
-        CallerNode.IndirectCalleeTypeIds.append(IndirectTypeIDs.begin(),
-                                                IndirectTypeIDs.end());
+        node.DirectCallees.append(callees.begin(), callees.end());
+        node.IndirectCalleeTypeIds.append(record.IndirectCalleeTypeIds.begin(),
+                                          record.IndirectCalleeTypeIds.end());
       }
-      if (!C)
-        consumeError(C.takeError());
     }
   }
 
-  // Phase 4: Reconstruct call graph and populate Ctx.arg.callGraphProfile.
-  Reconstructor.BuildGraph();
-  for (const ReconstructedCallGraphEdge &Edge : Reconstructor.GetEdges()) {
-    InputSectionBase *FromSec = NodeIdToSection[Edge.FromNodeId];
-    InputSectionBase *ToSec = NodeIdToSection[Edge.ToNodeId];
-    if (FromSec && ToSec && FromSec->isLive() && ToSec->isLive())
-      Ctx.arg.callGraphProfile[{FromSec, ToSec}] += Edge.Weight;
+  // Step 4: Reconstruct the graph and derive layout edges.
+  cg::CallGraph graph = builder.build();
+  for (const cg::WeightedEdge &edge : cg::computeLayoutEdges(graph)) {
+    InputSectionBase *from = nodeToSection[edge.From];
+    InputSectionBase *to = nodeToSection[edge.To];
+    if (from->isLive() && to->isLive())
+      ctx.arg.callGraphProfile[{from, to}] += edge.Weight;
   }
 }
 
@@ -3845,7 +3818,7 @@ template <class ELFT> void LinkerDriver::link(opt::InputArgList &args) {
     } else {
       if (ctx.arg.callGraphSectionSort != CGProfileSortKind::None) {
         ctx.arg.callGraphProfile.clear();
-        ReadCallGraphFromCallGraphSection<ELFT>(ctx);
+        readCallGraphFromCallGraphSection<ELFT>(ctx);
       } else if (ctx.arg.callGraphProfileSort != CGProfileSortKind::None) {
         readCallGraphsFromObjectFiles<ELFT>(ctx);
       }

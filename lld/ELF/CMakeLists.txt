@@ -65,6 +65,7 @@ add_lld_library(lldELF
   ${LLVM_TARGETS_TO_BUILD}
   BinaryFormat
   BitWriter
+  CallGraphSection
   Core
   DebugInfoDWARF
   Demangle

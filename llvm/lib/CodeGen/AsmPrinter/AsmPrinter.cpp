@@ -1839,7 +1839,7 @@ void AsmPrinter::emitCallGraphSection(const MachineFunction &MF,
   // 6) For each unique direct callee, the callee's PC.
   // 7) Number of unique indirect target type IDs, if at least one exists.
   // 8) Each unique indirect target type id.
-  OutStreamer->emitInt8(CallGraphSectionFormatVersion::V_0);
+  OutStreamer->emitInt8(callgraph::V_0);
   OutStreamer->emitInt8(static_cast<uint8_t>(CGFlags));
   OutStreamer->emitSymbolValue(getSymbol(&F), TM.getProgramPointerSize());
   const auto *TypeId = extractNumericCGTypeId(F);

@@ -21,6 +21,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Analysis/ProfileSummaryInfo.h"
 #include "llvm/Analysis/StaticDataProfileInfo.h"
+#include "llvm/BinaryFormat/CallGraphSection.h"
 #include "llvm/BinaryFormat/Dwarf.h"
 #include "llvm/CodeGen/DwarfStringPoolEntry.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
@@ -217,9 +218,8 @@ private:
     SmallSetVector<MCSymbol *, 4> DirectCallees;
   };
 
-  enum CallGraphSectionFormatVersion : uint8_t {
-    V_0 = 0,
-  };
+  // The `.llvm.callgraph` format version and flag constants are defined in
+  // llvm/BinaryFormat/CallGraphSection.h as `llvm::callgraph::V_0` etc.
 
   /// Output stream for the stack usage file (i.e., .su file).
   std::unique_ptr<raw_fd_ostream> StackUsageStream;
