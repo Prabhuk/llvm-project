@@ -1103,21 +1103,89 @@ template <class ELFT> static void readCallGraphsFromObjectFiles(Ctx &ctx) {
   }
 }
 
-// Returns true if the relocation at \p offset in an x86-64 code section is the
-// operand of a direct CALL/JMP/Jcc, i.e. a call rather than an address-take.
+// Returns true if a relocation of \p type in executable code is the target
+// operand of a direct call or branch, i.e. it transfers control to the symbol
+// rather than materializing its address.
 //
-// FIXME: This inspects the preceding opcode bytes, which is a heuristic on a
-// variable-length ISA and is x86-64 specific. Classify by relocation type
-// instead so that the analysis is sound and target independent.
-static bool isX86_64DirectBranch(ArrayRef<uint8_t> data, uint64_t offset) {
-  if (offset < 1 || offset > data.size())
+// The classification is by relocation type, so it is exact and independent of
+// instruction encoding. It is conservative: any type not listed here is treated
+// as an address-take. Misclassifying a call as an address-take can only add a
+// spurious indirect-call candidate; it can never hide a real one.
+//
+// Types that are used for both calls and address materialization (for example
+// R_X86_64_PC32, which older toolchains emit for `call foo` but which is also
+// used by `lea foo(%rip)`) are deliberately excluded.
+static bool isDirectBranchRelocation(uint16_t machine, uint32_t type) {
+  switch (machine) {
+  case EM_X86_64:
+    return type == R_X86_64_PLT32;
+  case EM_386:
+    return type == R_386_PLT32;
+  case EM_AARCH64:
+    switch (type) {
+    case R_AARCH64_CALL26:
+    case R_AARCH64_JUMP26:
+    case R_AARCH64_CONDBR19:
+    case R_AARCH64_TSTBR14:
+      return true;
+    }
     return false;
-  uint8_t op = data[offset - 1];
-  // E8: CALL rel32, E9: JMP rel32, EB: JMP rel8.
-  if (op == 0xE8 || op == 0xE9 || op == 0xEB)
-    return true;
-  // 0F 80..8F: Jcc rel32.
-  return offset >= 2 && data[offset - 2] == 0x0F && (op & 0xF0) == 0x80;
+  case EM_ARM:
+    switch (type) {
+    case R_ARM_CALL:
+    case R_ARM_JUMP24:
+    case R_ARM_PC24:
+    case R_ARM_PLT32:
+    case R_ARM_THM_CALL:
+    case R_ARM_THM_JUMP24:
+    case R_ARM_THM_JUMP19:
+    case R_ARM_THM_JUMP11:
+    case R_ARM_THM_JUMP8:
+      return true;
+    }
+    return false;
+  case EM_RISCV:
+    switch (type) {
+    case R_RISCV_CALL:
+    case R_RISCV_CALL_PLT:
+    case R_RISCV_JAL:
+    case R_RISCV_BRANCH:
+    case R_RISCV_RVC_JUMP:
+    case R_RISCV_RVC_BRANCH:
+      return true;
+    }
+    return false;
+  case EM_LOONGARCH:
+    switch (type) {
+    case R_LARCH_B16:
+    case R_LARCH_B21:
+    case R_LARCH_B26:
+    case R_LARCH_CALL36:
+      return true;
+    }
+    return false;
+  case EM_PPC64:
+    switch (type) {
+    case R_PPC64_REL24:
+    case R_PPC64_REL24_NOTOC:
+    case R_PPC64_REL14:
+    case R_PPC64_REL14_BRTAKEN:
+    case R_PPC64_REL14_BRNTAKEN:
+      return true;
+    }
+    return false;
+  case EM_PPC:
+    switch (type) {
+    case R_PPC_REL24:
+    case R_PPC_PLTREL24:
+    case R_PPC_LOCAL24PC:
+    case R_PPC_REL14:
+      return true;
+    }
+    return false;
+  default:
+    return false;
+  }
 }
 
 // Reconstruct a whole-program call graph from SHT_LLVM_CALL_GRAPH sections
@@ -1220,15 +1288,13 @@ static void readCallGraphFromCallGraphSection(Ctx &ctx) {
 
       bool isRefCode = (refSec->flags & SHF_EXECINSTR) != 0;
       bool isRefExternal = externalSections.contains(refSec);
-      ArrayRef<uint8_t> secData =
-          isRefCode ? refSec->content() : ArrayRef<uint8_t>();
 
-      auto processReloc = [&](uint64_t offset, uint32_t symIndex) {
+      auto processReloc = [&](uint32_t type, uint32_t symIndex) {
         InputSectionBase *target = resolveCallableSection(obj, symIndex);
         if (!target)
           return;
-        if (isRefCode && ctx.arg.emachine == EM_X86_64 &&
-            isX86_64DirectBranch(secData, offset))
+        // A direct call or branch is not an address-take.
+        if (isRefCode && isDirectBranchRelocation(ctx.arg.emachine, type))
           return;
 
         bool targetIsLocal = !externalSections.contains(target);
@@ -1241,9 +1307,11 @@ static void readCallGraphFromCallGraphSection(Ctx &ctx) {
       const RelsOrRelas<ELFT> rels =
           refSec->template relsOrRelas<ELFT>(/*supportsCrel=*/false);
       for (const typename ELFT::Rela &rel : rels.relas)
-        processReloc(rel.r_offset, rel.getSymbol(ctx.arg.isMips64EL));
+        processReloc(rel.getType(ctx.arg.isMips64EL),
+                     rel.getSymbol(ctx.arg.isMips64EL));
       for (const typename ELFT::Rel &rel : rels.rels)
-        processReloc(rel.r_offset, rel.getSymbol(ctx.arg.isMips64EL));
+        processReloc(rel.getType(ctx.arg.isMips64EL),
+                     rel.getSymbol(ctx.arg.isMips64EL));
     }
   }
 
