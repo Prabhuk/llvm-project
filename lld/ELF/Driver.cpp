@@ -1252,20 +1252,22 @@ static void readCallGraphFromCallGraphSection(Ctx &ctx) {
     return it->second;
   };
 
-  auto resolveCallableSection = [&](ObjFile<ELFT> *obj,
-                                    uint32_t symIndex) -> InputSectionBase * {
-    Symbol &sym = obj->getSymbol(symIndex);
-    auto *def = dyn_cast<Defined>(&sym);
+  auto callableSectionOf = [](Symbol *sym) -> InputSectionBase * {
+    auto *def = dyn_cast_or_null<Defined>(sym);
     if (!def || !def->section)
       return nullptr;
-    if (!sym.isSection() && sym.type != STT_FUNC && sym.type != STT_NOTYPE &&
-        sym.type != STT_GNU_IFUNC)
+    if (!sym->isSection() && sym->type != STT_FUNC && sym->type != STT_NOTYPE &&
+        sym->type != STT_GNU_IFUNC)
       return nullptr;
     auto *isec = dyn_cast<InputSectionBase>(def->section);
     if (!isec || isec == &InputSection::discarded || !isec->isLive() ||
         !(isec->flags & SHF_EXECINSTR))
       return nullptr;
     return isec;
+  };
+  auto resolveCallableSection = [&](ObjFile<ELFT> *obj,
+                                    uint32_t symIndex) -> InputSectionBase * {
+    return callableSectionOf(&obj->getSymbol(symIndex));
   };
 
   // Step 2: Whole-program address-taken evidence. Exported functions may be
@@ -1274,6 +1276,11 @@ static void readCallGraphFromCallGraphSection(Ctx &ctx) {
     builder.addAddressTakenFact(
         getOrCreateNode(const_cast<InputSectionBase *>(isec)),
         fileToModule.lookup(isec->file), /*IsGlobalEscape=*/true);
+
+  // Direct branches found in code, and code that branches outside the graph.
+  // Both are applied after the records are known (step 4).
+  SmallVector<std::pair<InputSectionBase *, InputSectionBase *>, 0> branchFacts;
+  SmallVector<InputSectionBase *, 0> callsUnknownSections;
 
   for (ELFFileBase *file : ctx.objectFiles) {
     auto *obj = cast<ObjFile<ELFT>>(file);
@@ -1291,10 +1298,22 @@ static void readCallGraphFromCallGraphSection(Ctx &ctx) {
 
       auto processReloc = [&](uint32_t type, uint32_t symIndex) {
         InputSectionBase *target = resolveCallableSection(obj, symIndex);
-        if (!target)
+
+        // A direct call or branch is not an address-take. Record it as a call
+        // fact instead; it becomes a direct edge for functions that have no
+        // record. A branch whose destination is not a function in this link
+        // (undefined, shared, IFUNC-dispatched, or interposable at load time)
+        // calls code the graph cannot see.
+        if (isRefCode && isDirectBranchRelocation(ctx.arg.emachine, type)) {
+          const Symbol &sym = obj->getSymbol(symIndex);
+          if (!target || sym.isGnuIFunc() ||
+              (!sym.isLocal() && computeIsPreemptible(ctx, sym)))
+            callsUnknownSections.push_back(refSec);
+          if (target)
+            branchFacts.push_back({refSec, target});
           return;
-        // A direct call or branch is not an address-take.
-        if (isRefCode && isDirectBranchRelocation(ctx.arg.emachine, type))
+        }
+        if (!target)
           return;
 
         bool targetIsLocal = !externalSections.contains(target);
@@ -1315,8 +1334,37 @@ static void readCallGraphFromCallGraphSection(Ctx &ctx) {
     }
   }
 
+  // The loop above skips .eh_frame because FDEs reference every function
+  // with unwind information, which is not an address-take. A CIE's
+  // personality routine, however, is called by the unwinder through that
+  // reference. (With an indirect encoding the CIE references a data word,
+  // DW.ref.<personality>, whose own relocation was already recorded above.)
+  for (EhInputSection *eh : ctx.ehInputSections) {
+    if (!eh->isLive())
+      continue;
+    for (const EhSectionPiece &cie : eh->cies)
+      if (cie.firstRelocation != unsigned(-1))
+        if (InputSectionBase *personality =
+                callableSectionOf(eh->rels[cie.firstRelocation].sym))
+          builder.addAddressTakenFact(getOrCreateNode(personality),
+                                      fileToModule.lookup(eh->file),
+                                      /*IsGlobalEscape=*/true);
+  }
+
   // Step 3: Decode SHT_LLVM_CALL_GRAPH records. Address fields are resolved
   // through the section's relocations.
+  //
+  // Nodes are sections, which may hold several functions (no
+  // -ffunction-sections, or top-level asm). Per section, remember which
+  // function entry offsets have a record and which type IDs they claim, so
+  // that step 4 can decide whether the section is completely described.
+  struct SectionRecords {
+    DenseSet<uint64_t> entryOffsets;
+    SmallVector<uint64_t, 1> typeIds;
+    bool allClaimIndirect = true;
+  };
+  DenseMap<const InputSectionBase *, SectionRecords> sectionRecords;
+
   for (ELFFileBase *file : ctx.objectFiles) {
     auto *obj = cast<ObjFile<ELFT>>(file);
     for (InputSectionBase *isec : obj->getSections()) {
@@ -1324,18 +1372,32 @@ static void readCallGraphFromCallGraphSection(Ctx &ctx) {
           isec->type != SHT_LLVM_CALL_GRAPH || !isec->isLive())
         continue;
 
-      DenseMap<uint64_t, uint32_t> offsetToSym;
+      // Offset of each address field -> (symbol index, addend).
+      DenseMap<uint64_t, std::pair<uint32_t, int64_t>> offsetToSym;
       const RelsOrRelas<ELFT> rels =
           isec->template relsOrRelas<ELFT>(/*supportsCrel=*/false);
       for (const typename ELFT::Rela &rel : rels.relas)
-        offsetToSym[rel.r_offset] = rel.getSymbol(ctx.arg.isMips64EL);
+        offsetToSym[rel.r_offset] = {rel.getSymbol(ctx.arg.isMips64EL),
+                                     rel.r_addend};
       for (const typename ELFT::Rel &rel : rels.rels)
-        offsetToSym[rel.r_offset] = rel.getSymbol(ctx.arg.isMips64EL);
+        if (rel.r_offset < isec->content().size())
+          offsetToSym[rel.r_offset] = {
+              rel.getSymbol(ctx.arg.isMips64EL),
+              ctx.target->getImplicitAddend(isec->content().data() +
+                                                rel.r_offset,
+                                            rel.getType(ctx.arg.isMips64EL))};
 
       auto resolveAt = [&](uint64_t offset) -> InputSectionBase * {
         auto it = offsetToSym.find(offset);
-        return it == offsetToSym.end() ? nullptr
-                                       : resolveCallableSection(obj, it->second);
+        return it == offsetToSym.end()
+                   ? nullptr
+                   : resolveCallableSection(obj, it->second.first);
+      };
+      // Offset of the addressed function within its section.
+      auto entryOffsetAt = [&](uint64_t offset) -> uint64_t {
+        auto [symIndex, addend] = offsetToSym.lookup(offset);
+        auto *def = cast<Defined>(&obj->getSymbol(symIndex));
+        return def->value + addend;
       };
 
       cg::RecordReader reader(isec->content(), ctx.arg.isLE,
@@ -1351,6 +1413,13 @@ static void readCallGraphFromCallGraphSection(Ctx &ctx) {
         if (!callerSec)
           continue;
 
+        SectionRecords &recs = sectionRecords[callerSec];
+        recs.entryOffsets.insert(entryOffsetAt(record.FunctionAddressOffset));
+        if (record.isIndirectTarget() && record.FunctionTypeId != 0)
+          recs.typeIds.push_back(record.FunctionTypeId);
+        else
+          recs.allClaimIndirect = false;
+
         cg::NodeId caller = getOrCreateNode(callerSec);
         SmallVector<cg::NodeId, 4> callees;
         for (uint64_t offset : record.DirectCalleeAddressOffsets)
@@ -1359,10 +1428,6 @@ static void readCallGraphFromCallGraphSection(Ctx &ctx) {
 
         // getOrCreateNode may grow the builder, so take the reference last.
         cg::FunctionNode &node = builder.getFunction(caller);
-        if (record.isIndirectTarget() && record.FunctionTypeId != 0) {
-          node.IsIndirectTarget = true;
-          node.TypeId = record.FunctionTypeId;
-        }
         node.DirectCallees.append(callees.begin(), callees.end());
         node.IndirectCalleeTypeIds.append(record.IndirectCalleeTypeIds.begin(),
                                           record.IndirectCalleeTypeIds.end());
@@ -1370,8 +1435,99 @@ static void readCallGraphFromCallGraphSection(Ctx &ctx) {
     }
   }
 
-  // Step 4: Reconstruct the graph and derive layout edges.
+  // Step 4: Decide coverage per section. A section is described by records
+  // only if every function entry in it has one; a function symbol without a
+  // record (hand-written or top-level asm sharing the section) makes the
+  // section's behavior partly unknown. ARM/AArch64 mapping symbols ($a, $d,
+  // $t, $x) and assembler-local labels are not function entries.
+  DenseSet<const InputSectionBase *> partiallyRecorded;
+  for (ELFFileBase *file : ctx.objectFiles) {
+    for (Symbol *sym : file->getSymbols()) {
+      auto *def = dyn_cast_or_null<Defined>(sym);
+      if (!def || !def->section || sym->isSection())
+        continue;
+      if (sym->type != STT_FUNC && sym->type != STT_GNU_IFUNC &&
+          sym->type != STT_NOTYPE)
+        continue;
+      StringRef name = sym->getName();
+      if (sym->type == STT_NOTYPE &&
+          (name.starts_with("$") || name.starts_with(".L")))
+        continue;
+      auto *sec = dyn_cast<InputSectionBase>(def->section);
+      if (!sec)
+        continue;
+      auto it = sectionRecords.find(sec);
+      if (it != sectionRecords.end() &&
+          !it->second.entryOffsets.contains(def->value))
+        partiallyRecorded.insert(sec);
+    }
+  }
+
+  for (const auto &[isec, recs] : sectionRecords) {
+    cg::FunctionNode &node = builder.getFunction(sectionToNode.lookup(isec));
+    node.HasRecord = !partiallyRecorded.contains(isec);
+    // Typed only if every recorded function claims to be an indirect target;
+    // otherwise the node is untyped, which is conservative.
+    node.IsIndirectTarget = recs.allClaimIndirect && !recs.typeIds.empty();
+    node.TypeIds.assign(recs.typeIds.begin(), recs.typeIds.end());
+    llvm::sort(node.TypeIds);
+    node.TypeIds.erase(llvm::unique(node.TypeIds), node.TypeIds.end());
+  }
+
+  // Branch relocations are exact control-transfer facts. For code without a
+  // complete record they are its direct calls. A record already lists the
+  // calls of the functions it describes, but not their jumps into other
+  // sections (the cold part of a function split by -fsplit-machine-functions,
+  // another basic block section), so for recorded code they are jump targets:
+  // part of the graph, but not layout edges.
+  for (auto [from, to] : branchFacts) {
+    cg::NodeId fromNode = getOrCreateNode(from);
+    cg::NodeId toNode = getOrCreateNode(to);
+    cg::FunctionNode &node = builder.getFunction(fromNode);
+    if (node.HasRecord)
+      node.JumpTargets.push_back(toNode);
+    else
+      node.DirectCallees.push_back(toNode);
+  }
+  for (InputSectionBase *isec : callsUnknownSections)
+    builder.getFunction(getOrCreateNode(isec)).CallsUnknown = true;
+
+  // Every live executable section is a node, even one no fact mentions, so
+  // that coverage and reachability account for all code. Appended last to
+  // keep the NodeIds of the sections above stable.
+  for (ELFFileBase *file : ctx.objectFiles)
+    for (InputSectionBase *isec : file->getSections())
+      if (isec && isec != &InputSection::discarded && isec->isLive() &&
+          (isec->flags & SHF_EXECINSTR) && isec->getSize() != 0)
+        getOrCreateNode(isec);
+
+  // Step 5: Reconstruct the graph and derive layout edges.
   cg::CallGraph graph = builder.build();
+
+  if (ctx.e.verbose) {
+    uint64_t numSections = 0, numRecorded = 0, bytes = 0, recordedBytes = 0;
+    for (ELFFileBase *file : ctx.objectFiles)
+      for (InputSectionBase *isec : file->getSections()) {
+        if (!isec || isec == &InputSection::discarded || !isec->isLive() ||
+            !(isec->flags & SHF_EXECINSTR) || isec->getSize() == 0)
+          continue;
+        ++numSections;
+        bytes += isec->getSize();
+        auto it = sectionToNode.find(isec);
+        if (it != sectionToNode.end() && graph[it->second].HasRecord) {
+          ++numRecorded;
+          recordedBytes += isec->getSize();
+        }
+      }
+    const cg::CoverageSummary &c = graph.coverage();
+    Log(ctx) << "--call-graph-section: " << numRecorded << " of " << numSections
+             << " executable sections (" << recordedBytes << " of " << bytes
+             << " bytes) are fully described by .llvm.callgraph records; "
+             << c.NumCallingUnknown << " may call unknown code; "
+             << c.NumUntypedAddressTaken << " of " << c.NumAddressTaken
+             << " address-taken are untyped";
+  }
+
   for (const cg::WeightedEdge &edge : cg::computeLayoutEdges(graph)) {
     InputSectionBase *from = nodeToSection[edge.From];
     InputSectionBase *to = nodeToSection[edge.To];
