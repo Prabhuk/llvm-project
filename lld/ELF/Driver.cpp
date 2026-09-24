@@ -50,6 +50,7 @@
 #include "llvm/ADT/StringSwitch.h"
 #include "llvm/CallGraphSection/CallGraph.h"
 #include "llvm/CallGraphSection/LayoutWeights.h"
+#include "llvm/CallGraphSection/Reachability.h"
 #include "llvm/CallGraphSection/RecordReader.h"
 #include "llvm/Config/llvm-config.h"
 #include "llvm/LTO/LTO.h"
@@ -1188,6 +1189,165 @@ static bool isDirectBranchRelocation(uint16_t machine, uint32_t type) {
   }
 }
 
+// Registers the roots of the reachability analysis behind
+// --call-graph-section-cold-unreachable: code that may run without being
+// called by other code in the graph.
+//
+// The roots mirror the garbage collection roots (MarkLive.cpp), which exist
+// for the same reason, plus IFUNC resolvers (run by the loader) and the code
+// that unwind tables refer to other than the function they describe
+// (personality routines, and landing pads placed in another section). A data
+// section that is itself a root -- .init_array, or an exported variable that
+// another program can read -- makes every function it refers to, directly or
+// through other data, a root. If functions are exported, code outside this
+// link can call in and obtain any function pointer, so it may call any
+// address-taken function.
+//
+// A missed root only costs performance here (the code is placed last), but
+// the roots are kept complete so that the analysis stays sound.
+template <class ELFT>
+static void addCallGraphSectionRoots(
+    Ctx &ctx, llvm::callgraph::CallGraphBuilder &builder,
+    function_ref<llvm::callgraph::NodeId(InputSectionBase *)> getOrCreateNode,
+    const SetVector<const InputSectionBase *> &exportedFuncSections) {
+  auto isLiveSection = [](InputSectionBase *sec) {
+    return sec && sec != &InputSection::discarded && sec->isLive();
+  };
+  auto sectionOf = [&](Symbol *sym) -> InputSectionBase * {
+    auto *def = dyn_cast_or_null<Defined>(sym);
+    auto *sec =
+        def ? dyn_cast_or_null<InputSectionBase>(def->section) : nullptr;
+    return isLiveSection(sec) ? sec : nullptr;
+  };
+  // Calls fn for the live target section of every relocation of sec.
+  auto forEachTarget = [&](InputSectionBase *sec,
+                           function_ref<void(InputSectionBase *)> fn) {
+    if (!sec->file || sec->file->kind() != InputFile::ObjKind)
+      return;
+    auto visit = [&](const auto &rel) {
+      if (InputSectionBase *target =
+              sectionOf(&sec->file->getRelocTargetSym(rel)))
+        fn(target);
+    };
+    const RelsOrRelas<ELFT> rels =
+        sec->template relsOrRelas<ELFT>(/*supportsCrel=*/false);
+    for (const typename ELFT::Rela &rel : rels.relas)
+      visit(rel);
+    for (const typename ELFT::Rel &rel : rels.rels)
+      visit(rel);
+  };
+
+  SmallVector<InputSectionBase *, 0> dataWorklist;
+  DenseSet<InputSectionBase *> dataVisited;
+  auto addRootSection = [&](InputSectionBase *sec) {
+    if (!isLiveSection(sec) || !(sec->flags & SHF_ALLOC))
+      return;
+    if (sec->flags & SHF_EXECINSTR)
+      builder.addRoot(getOrCreateNode(sec));
+    else if (dataVisited.insert(sec).second)
+      dataWorklist.push_back(sec);
+  };
+  auto addRootSymbol = [&](Symbol *sym) { addRootSection(sectionOf(sym)); };
+
+  // Symbols that the loader, the command line, a linker script or another
+  // program may use.
+  addRootSymbol(ctx.symtab->find(ctx.arg.entry));
+  addRootSymbol(ctx.symtab->find(ctx.arg.init));
+  addRootSymbol(ctx.symtab->find(ctx.arg.fini));
+  for (StringRef s : ctx.arg.undefined)
+    addRootSymbol(ctx.symtab->find(s));
+  for (StringRef s : ctx.script->referencedSymbols)
+    addRootSymbol(ctx.symtab->find(s));
+  for (auto &entry : ctx.symtab->cmseSymMap) {
+    addRootSymbol(entry.second.sym);
+    addRootSymbol(entry.second.acleSeSym);
+  }
+  for (Symbol *sym : ctx.symtab->getSymbols())
+    if (sym->isExported)
+      addRootSymbol(sym);
+  for (const InputSectionBase *isec : exportedFuncSections)
+    addRootSection(const_cast<InputSectionBase *>(isec));
+  if (!exportedFuncSections.empty())
+    builder.addUnknownCodeRoot();
+
+  // IFUNC resolvers are run by the loader.
+  for (ELFFileBase *file : ctx.objectFiles)
+    for (Symbol *sym : file->getSymbols())
+      if (sym && sym->isGnuIFunc())
+        addRootSymbol(sym);
+
+  // A reference from unwind information describing func: code other than
+  // func is a root (a personality routine, or landing pads in another
+  // section); data (an LSDA or an ARM exception table entry) is scanned for
+  // such code in turn.
+  auto addUnwindTarget = [&](InputSectionBase *target, InputSectionBase *func) {
+    if (target == func)
+      return;
+    if (target->flags & SHF_EXECINSTR) {
+      addRootSection(target);
+      return;
+    }
+    forEachTarget(target, [&](InputSectionBase *code) {
+      if (code != func && (code->flags & SHF_EXECINSTR))
+        addRootSection(code);
+    });
+  };
+
+  // Sections that are kept for their own sake.
+  for (ELFFileBase *file : ctx.objectFiles)
+    for (InputSectionBase *sec : file->getSections()) {
+      if (!isLiveSection(sec))
+        continue;
+      if (sec->type == SHT_ARM_EXIDX) {
+        if (auto *exidx = dyn_cast<InputSection>(sec)) {
+          InputSectionBase *func = exidx->getLinkOrderDep();
+          forEachTarget(exidx, [&](InputSectionBase *target) {
+            addUnwindTarget(target, func);
+          });
+        }
+        continue;
+      }
+      if ((sec->flags & SHF_GNU_RETAIN) ||
+          (!(sec->flags & SHF_LINK_ORDER) &&
+           (isReserved(sec) || ctx.script->shouldKeep(sec) ||
+            isValidCIdentifier(sec->name))))
+        addRootSection(sec);
+    }
+
+  // .eh_frame: a CIE's personality routine is called by the unwinder, and an
+  // FDE's LSDA may place landing pads in another section. The first
+  // relocation of an FDE is the function it describes.
+  for (EhInputSection *eh : ctx.ehInputSections) {
+    if (!eh->isLive())
+      continue;
+    ArrayRef<Relocation> rels = eh->rels;
+    for (const EhSectionPiece &cie : eh->cies)
+      if (cie.firstRelocation != unsigned(-1))
+        addRootSymbol(rels[cie.firstRelocation].sym);
+    for (const EhSectionPiece &fde : eh->fdes) {
+      size_t first = fde.firstRelocation;
+      if (first == unsigned(-1))
+        continue;
+      InputSectionBase *func = sectionOf(rels[first].sym);
+      if (!func)
+        continue;
+      uint64_t pieceEnd = fde.inputOff + fde.size;
+      for (size_t j = first + 1; j < rels.size() && rels[j].offset < pieceEnd;
+           ++j)
+        if (InputSectionBase *target = sectionOf(rels[j].sym))
+          addUnwindTarget(target, func);
+    }
+  }
+
+  // Functions referenced, directly or through other data, from data that is
+  // a root.
+  while (!dataWorklist.empty()) {
+    InputSectionBase *sec = dataWorklist.pop_back_val();
+    if (!isa<EhInputSection>(sec))
+      forEachTarget(sec, addRootSection);
+  }
+}
+
 // Reconstruct a whole-program call graph from SHT_LLVM_CALL_GRAPH sections
 // and use it to populate ctx.arg.callGraphSectionProfile.
 //
@@ -1504,15 +1664,23 @@ static void readCallGraphFromCallGraphSection(Ctx &ctx) {
           (isec->flags & SHF_EXECINSTR) && isec->getSize() != 0)
         getOrCreateNode(isec);
 
+  if (ctx.arg.callGraphSectionColdUnreachable)
+    addCallGraphSectionRoots<ELFT>(ctx, builder, getOrCreateNode,
+                                   exportedFuncSections);
+
   // Step 5: Reconstruct the graph and derive layout edges.
   cg::CallGraph graph = builder.build();
+
+  auto isCandidate = [](InputSectionBase *isec) {
+    return isec && isec != &InputSection::discarded && isec->isLive() &&
+           (isec->flags & SHF_EXECINSTR) && isec->getSize() != 0;
+  };
 
   if (ctx.e.verbose) {
     uint64_t numSections = 0, numRecorded = 0, bytes = 0, recordedBytes = 0;
     for (ELFFileBase *file : ctx.objectFiles)
       for (InputSectionBase *isec : file->getSections()) {
-        if (!isec || isec == &InputSection::discarded || !isec->isLive() ||
-            !(isec->flags & SHF_EXECINSTR) || isec->getSize() == 0)
+        if (!isCandidate(isec))
           continue;
         ++numSections;
         bytes += isec->getSize();
@@ -1531,9 +1699,58 @@ static void readCallGraphFromCallGraphSection(Ctx &ctx) {
              << " address-taken are untyped";
   }
 
+  // Reachability-based cold placement.
+  if (ctx.arg.callGraphSectionColdUnreachable) {
+    // Sections that a measured profile observed executing are known to run,
+    // and so is everything they may call.
+    SmallVector<cg::NodeId, 0> observed;
+    for (const auto &[edge, count] : ctx.arg.callGraphProfile) {
+      if (count == 0)
+        continue;
+      for (const InputSectionBase *isec : {edge.first, edge.second}) {
+        auto it = sectionToNode.find(isec);
+        if (it != sectionToNode.end())
+          observed.push_back(it->second);
+      }
+    }
+    cg::ReachabilityOptions options;
+    options.AdditionalRoots = observed;
+    BitVector reachable = cg::computeReachable(graph, options);
+
+    uint64_t unreachableBytes = 0;
+    for (cg::NodeId n = 0, e = graph.numFunctions(); n != e; ++n) {
+      InputSectionBase *isec = nodeToSection[n];
+      if (!reachable.test(n) && isCandidate(isec)) {
+        ctx.arg.callGraphSectionUnreachable.insert(isec);
+        unreachableBytes += isec->getSize();
+      }
+    }
+
+    if (ctx.e.verbose) {
+      // Observed sections that the static roots alone do not reach indicate
+      // an entry point that the roots miss (for example a signal handler).
+      llvm::sort(observed);
+      observed.erase(llvm::unique(observed), observed.end());
+      BitVector staticallyReachable = cg::computeReachable(graph);
+      size_t numMissed = llvm::count_if(
+          observed, [&](cg::NodeId n) { return !staticallyReachable.test(n); });
+      Log(ctx) << "--call-graph-section-cold-unreachable: "
+               << ctx.arg.callGraphSectionUnreachable.size()
+               << " executable sections (" << unreachableBytes
+               << " bytes) are unreachable from the roots; " << numMissed
+               << " of " << observed.size()
+               << " sections in the measured profile are not reachable from "
+                  "the static roots";
+    }
+  }
+
   for (const cg::WeightedEdge &edge : cg::computeLayoutEdges(graph)) {
     InputSectionBase *from = nodeToSection[edge.From];
     InputSectionBase *to = nodeToSection[edge.To];
+    // Unreachable code is placed last; an edge must not pull it towards
+    // reachable code. (A reachable caller implies a reachable callee.)
+    if (ctx.arg.callGraphSectionUnreachable.contains(from))
+      continue;
     if (from->isLive() && to->isLive())
       ctx.arg.callGraphSectionProfile[{from, to}] += edge.Weight;
   }
@@ -1858,6 +2075,9 @@ static void readConfigs(Ctx &ctx, opt::InputArgList &args) {
   }
   ctx.arg.callGraphProfileSort = getCGProfileSortKind(ctx, args);
   ctx.arg.callGraphSection = getCallGraphSectionMode(ctx, args);
+  ctx.arg.callGraphSectionColdUnreachable =
+      args.hasFlag(OPT_call_graph_section_cold_unreachable,
+                   OPT_no_call_graph_section_cold_unreachable, false);
   parseBPOrdererOptions(ctx, args);
   ctx.arg.checkSections =
       args.hasFlag(OPT_check_sections, OPT_no_check_sections, true);
@@ -4054,6 +4274,11 @@ template <class ELFT> void LinkerDriver::link(opt::InputArgList &args) {
     if (ctx.arg.callGraphSection != CallGraphSectionMode::None)
       readCallGraphFromCallGraphSection<ELFT>(ctx);
   }
+  if (ctx.arg.callGraphSectionColdUnreachable &&
+      (ctx.arg.callGraphSection == CallGraphSectionMode::None ||
+       ctx.arg.callGraphProfileSort == CGProfileSortKind::None))
+    Warn(ctx) << "--call-graph-section-cold-unreachable has no effect without "
+                 "--call-graph-section and --call-graph-profile-sort";
 
   // Write the result to the file.
   writeResult<ELFT>(ctx);

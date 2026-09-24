@@ -1168,6 +1168,11 @@ buildSectionOrder(Ctx &ctx, DenseSet<const InputSectionBase *> &secondary) {
 // insertion point are then sorted and placed immediately after the primary
 // block; those before it keep their input order so that the primary block's
 // offset is unchanged.
+//
+// Sections that the static call graph proves unreachable
+// (--call-graph-section-cold-unreachable) and that no other source orders are
+// cold: they are moved to the end of the ISD and take no part in choosing the
+// insertion point.
 static void
 sortISDBySectionOrder(Ctx &ctx, InputSectionDescription *isd,
                       const DenseMap<const InputSectionBase *, int> &order,
@@ -1179,14 +1184,24 @@ sortISDBySectionOrder(Ctx &ctx, InputSectionDescription *isd,
   auto isSecondary = [&](InputSection *isec) {
     return hasPrimary && secondary.contains(isec);
   };
+  const DenseSet<const InputSectionBase *> &unreachable =
+      ctx.arg.callGraphSectionUnreachable;
+  auto isCold = [&](InputSection *isec) {
+    return unreachable.contains(isec) && !order.contains(isec);
+  };
 
   // unorderedSections also holds secondary sections, in input order.
   SmallVector<InputSection *, 0> unorderedSections;
   SmallVector<std::pair<InputSection *, int>, 0> orderedSections;
+  SmallVector<InputSection *, 0> coldSections;
   uint64_t unorderedSize = 0;
   uint64_t totalSize = 0;
 
   for (InputSection *isec : isd->sections) {
+    if (!unreachable.empty() && isCold(isec)) {
+      coldSections.push_back(isec);
+      continue;
+    }
     if (executableOutputSection)
       totalSize += isec->getSize();
     auto i = order.find(isec);
@@ -1260,6 +1275,7 @@ sortISDBySectionOrder(Ctx &ctx, InputSectionDescription *isd,
   for (InputSection *isec : ArrayRef(unorderedSections).slice(insPt))
     if (!isSecondary(isec))
       isd->sections.push_back(isec);
+  isd->sections.append(coldSections.begin(), coldSections.end());
 }
 
 static void sortSection(Ctx &ctx, OutputSection &osec,
@@ -1275,7 +1291,7 @@ static void sortSection(Ctx &ctx, OutputSection &osec,
   // --symbol-ordering-file or --shuffle-sections=. This is a least significant
   // digit radix sort. The sections may be sorted stably again by a more
   // significant key.
-  if (!order.empty())
+  if (!order.empty() || !ctx.arg.callGraphSectionUnreachable.empty())
     for (SectionCommand *b : osec.commands)
       if (auto *isd = dyn_cast<InputSectionDescription>(b))
         sortISDBySectionOrder(ctx, isd, order, secondary,

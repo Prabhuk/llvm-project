@@ -66,9 +66,10 @@
 // nodes, in the style of llvm::CallGraph's external nodes:
 //
 //   - ExternalCallingNode: calls every root registered with addRoot()
-//     (program entry points, exported functions, ...). It is the GraphTraits
-//     entry node, so a depth-first walk from it yields every function that may
-//     execute.
+//     (program entry points, exported functions, ...), and UnknownCalleeNode
+//     if addUnknownCodeRoot() was called. It is the GraphTraits entry node,
+//     so a depth-first walk from it yields every function that may execute
+//     (see also Reachability.h).
 //   - UnknownCalleeNode: stands for "any code the graph cannot see". It is
 //     called by every function without a record and by every function marked
 //     CallsUnknown (for example because it calls into a shared library), and
@@ -334,6 +335,13 @@ public:
   /// ExternalCallingNode.
   void addRoot(NodeId N);
 
+  /// Record that code outside the graph may run on its own and call any
+  /// function whose address it can obtain -- for example a program that
+  /// calls into this shared library through exported functions (which can
+  /// return function pointers) or reads exported data holding them.
+  /// ExternalCallingNode then also calls UnknownCalleeNode.
+  void addUnknownCodeRoot() { UnknownCodeIsRoot = true; }
+
   /// Resolve indirect call sites and materialize the graph. The builder may
   /// be discarded afterwards.
   CallGraph build();
@@ -343,6 +351,7 @@ private:
   DenseSet<NodeId> GloballyAddressTaken;
   DenseMap<ModuleId, DenseSet<NodeId>> LocallyAddressTaken;
   SmallVector<NodeId, 0> Roots;
+  bool UnknownCodeIsRoot = false;
 };
 
 /// Maps an adjacency entry to its node pointer. Implementation detail of

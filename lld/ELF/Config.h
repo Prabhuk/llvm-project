@@ -335,6 +335,10 @@ struct Config {
   llvm::MapVector<std::pair<const InputSectionBase *, const InputSectionBase *>,
                   uint64_t>
       callGraphSectionProfile;
+  // Executable sections that the SHT_LLVM_CALL_GRAPH call graph proves
+  // unreachable from the program's roots
+  // (--call-graph-section-cold-unreachable).
+  llvm::DenseSet<const InputSectionBase *> callGraphSectionUnreachable;
   bool cmseImplib = false;
   bool allowMultipleDefinition;
   bool fatLTOObjects;
@@ -350,6 +354,7 @@ struct Config {
   BsymbolicKind bsymbolic = BsymbolicKind::None;
   CGProfileSortKind callGraphProfileSort;
   CallGraphSectionMode callGraphSection = CallGraphSectionMode::None;
+  bool callGraphSectionColdUnreachable = false;
   llvm::StringRef irpgoProfilePath;
   bool bpStartupFunctionSort = false;
   bool bpCompressionSortStartupFunctions = false;
