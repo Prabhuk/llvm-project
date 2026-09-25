@@ -1455,16 +1455,14 @@ static CGProfileSortKind getCGProfileSortKind(Ctx &ctx,
   return CGProfileSortKind::None;
 }
 
-static CGProfileSortKind getCGSectionSortKind(Ctx &ctx,
-                                              opt::InputArgList &args) {
-  StringRef s = args.getLastArgValue(OPT_call_graph_section_sort, "none");
-  if (s == "hfsort")
-    return CGProfileSortKind::Hfsort;
-  if (s == "cdsort")
-    return CGProfileSortKind::Cdsort;
+static CallGraphSectionMode getCallGraphSectionMode(Ctx &ctx,
+                                                    opt::InputArgList &args) {
+  StringRef s = args.getLastArgValue(OPT_call_graph_section, "none");
+  if (s == "only")
+    return CallGraphSectionMode::Only;
   if (s != "none")
-    ErrAlways(ctx) << "unknown --call-graph-section-sort= value: " << s;
-  return CGProfileSortKind::None;
+    ErrAlways(ctx) << "unknown --call-graph-section= value: " << s;
+  return CallGraphSectionMode::None;
 }
 
 static void parseBPOrdererOptions(Ctx &ctx, opt::InputArgList &args) {
@@ -1698,7 +1696,7 @@ static void readConfigs(Ctx &ctx, opt::InputArgList &args) {
       ctx.arg.bsymbolic = BsymbolicKind::All;
   }
   ctx.arg.callGraphProfileSort = getCGProfileSortKind(ctx, args);
-  ctx.arg.callGraphSectionSort = getCGSectionSortKind(ctx, args);
+  ctx.arg.callGraphSection = getCallGraphSectionMode(ctx, args);
   parseBPOrdererOptions(ctx, args);
   ctx.arg.checkSections =
       args.hasFlag(OPT_check_sections, OPT_no_check_sections, true);
@@ -3877,20 +3875,18 @@ template <class ELFT> void LinkerDriver::link(opt::InputArgList &args) {
   }
 
   // Read the callgraph now that we know what was gced or icfed
-  if (ctx.arg.callGraphProfileSort != CGProfileSortKind::None ||
-      ctx.arg.callGraphSectionSort != CGProfileSortKind::None) {
-    if (auto *arg = args.getLastArg(OPT_call_graph_ordering_file)) {
+  if (ctx.arg.callGraphProfileSort != CGProfileSortKind::None) {
+    if (ctx.arg.callGraphSection == CallGraphSectionMode::Only) {
+      if (args.hasArg(OPT_call_graph_ordering_file))
+        Warn(ctx) << "--call-graph-ordering-file is ignored with "
+                     "--call-graph-section=only";
+      readCallGraphFromCallGraphSection<ELFT>(ctx);
+    } else if (auto *arg = args.getLastArg(OPT_call_graph_ordering_file)) {
       if (std::optional<MemoryBufferRef> buffer =
               readFile(ctx, arg->getValue()))
         readCallGraph(ctx, *buffer);
-    } else {
-      if (ctx.arg.callGraphSectionSort != CGProfileSortKind::None) {
-        ctx.arg.callGraphProfile.clear();
-        readCallGraphFromCallGraphSection<ELFT>(ctx);
-      } else if (ctx.arg.callGraphProfileSort != CGProfileSortKind::None) {
-        readCallGraphsFromObjectFiles<ELFT>(ctx);
-      }
-    }
+    } else
+      readCallGraphsFromObjectFiles<ELFT>(ctx);
   }
 
   // Write the result to the file.

@@ -102,6 +102,13 @@ enum class BuildIdKind { None, Fast, Md5, Sha1, Hexstring, Uuid };
 // For --call-graph-profile-sort={none,hfsort,cdsort}.
 enum class CGProfileSortKind { None, Hfsort, Cdsort };
 
+// For --call-graph-section={none,only}. Selects whether the call graph
+// reconstructed from SHT_LLVM_CALL_GRAPH sections is used as the edge source
+// for --call-graph-profile-sort. The sort algorithm is selected independently.
+//  - None: ignore SHT_LLVM_CALL_GRAPH sections.
+//  - Only: ignore any measured profile and use only the static call graph.
+enum class CallGraphSectionMode { None, Only };
+
 // For --discard-{all,locals,none}.
 enum class DiscardPolicy { Default, All, Locals, None };
 
@@ -333,7 +340,7 @@ struct Config {
   bool armBe8 = false;
   BsymbolicKind bsymbolic = BsymbolicKind::None;
   CGProfileSortKind callGraphProfileSort;
-  CGProfileSortKind callGraphSectionSort = CGProfileSortKind::None;
+  CallGraphSectionMode callGraphSection = CallGraphSectionMode::None;
   llvm::StringRef irpgoProfilePath;
   bool bpStartupFunctionSort = false;
   bool bpCompressionSortStartupFunctions = false;
