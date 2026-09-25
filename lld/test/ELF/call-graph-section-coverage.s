@@ -14,8 +14,18 @@
 ## Direct branches in code without a record are exact call facts, so the
 ## assembly routine asm_copy is laid out next to asm_step, which it calls.
 # RUN: ld.lld --call-graph-section=only --call-graph-profile-sort=hfsort -e c_main \
-# RUN:   cov.o asm.o mixed.o ext.so -o out
+# RUN:   cov.o asm.o mixed.o ext.so -o out --verbose 2>&1 | FileCheck %s --check-prefix=LOG
 # RUN: llvm-nm -n out | FileCheck %s --check-prefix=ORDER
+
+## Coverage report:
+## - Fully described: c_main, c_leaf, c_callback (cov.o).
+## - Not described: asm_filler, asm_step, asm_copy (asm.o) and .text of
+##   mixed.o, which holds a recorded function and an assembly function.
+## - Calling unknown code: the four undescribed sections, plus c_leaf, which
+##   calls ext_fn in a shared library.
+## - Address-taken: c_callback (typed), asm_step (untyped) and mixed.o's .text
+##   (untyped: its assembly part has no type).
+# LOG: --call-graph-section: 3 of 7 executable sections ({{[0-9]+}} of {{[0-9]+}} bytes) are fully described by .llvm.callgraph records; 5 may call unknown code; 2 of 3 address-taken are untyped
 
 ## c_main's record gives c_main -> {asm_copy, c_leaf}; asm_copy's branch
 ## relocation gives asm_copy -> asm_step. The rest keeps its input order.
