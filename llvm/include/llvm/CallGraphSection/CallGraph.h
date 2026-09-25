@@ -34,10 +34,26 @@
 //      from being treated as interchangeable.
 //   3. Per-call-site resolution. Each indirect signature used by a function
 //      resolves to a candidate target set, retained per signature so that
-//      fan-out remains visible to consumers.
+//      fan-out remains visible to consumers. A candidate set depends only on
+//      the signature and, if the caller's module has module-local candidates
+//      for it, on that module, so call sites share one copy of each distinct
+//      set (see TargetSet nodes below).
 //   4. Adjacency and reverse index, including self-edges, so that recursion
 //      and strongly connected components are observable (a stack-depth
 //      estimator needs this; a layout pass simply ignores self-edges).
+//
+// Shared candidate sets
+// ---------------------
+//
+// Large programs have many indirect call sites but few distinct candidate
+// sets (for example, every virtual call through one vtable slot type has the
+// same candidates). Listing each set in every caller's adjacency would make
+// the graph O(sites x candidates). Instead, build() creates one TargetSet
+// pseudo node per distinct non-empty set: a function calls the TargetSet node
+// of each of its indirect call sites, and the TargetSet node calls every
+// candidate in the set. Paths, and hence reachability and strongly connected
+// components of function nodes, are exactly those of the expanded graph; a
+// TargetSet node is merely a relay and executes no code.
 //
 // Partial coverage
 // ----------------
@@ -67,7 +83,10 @@
 // DirectCallees and IndirectCallSite::Targets stay exact, and pseudo nodes are
 // non-executable, so layout policies built on those are unaffected. Clients
 // that need a sound over-approximation (reachability, stack depth) must treat
-// UnknownCalleeNode as "anything may happen here".
+// UnknownCalleeNode as "anything may happen here", and every pseudo node as
+// having no frame of its own. In particular, callers() of an indirect call
+// target lists the TargetSet nodes that contain it; the functions calling
+// through them are the callers() of those TargetSet nodes.
 //
 //===----------------------------------------------------------------------===//
 
@@ -101,6 +120,8 @@ enum class NodeKind : uint8_t {
   ExternalCalling,
   UnknownCallee,
   UntypedTargets,
+  /// Relay to the candidates of one distinct indirect call target set.
+  TargetSet,
 };
 
 /// One function in the reconstructed call graph.
@@ -169,9 +190,10 @@ struct FunctionNode {
   /// True if whole-program evidence confirms the address is taken somewhere.
   bool IsAddressTaken = false;
 
-  /// Deduplicated union of direct callees, resolved indirect candidates and
-  /// pseudo-node edges. Self-edges are preserved. This is the adjacency used
-  /// by GraphTraits.
+  /// Deduplicated union of direct callees, jump targets and pseudo-node edges
+  /// (including the TargetSet node of each indirect call site with
+  /// candidates). Self-edges are preserved. This is the adjacency used by
+  /// GraphTraits.
   SmallVector<NodeId, 4> Callees;
 
   /// Reverse of Callees.
@@ -196,6 +218,10 @@ struct IndirectCallSite {
   /// a confidence signal. Functions that cannot be excluded by type (see
   /// UntypedTargetsNode) are not listed here.
   ArrayRef<NodeId> Targets;
+
+  /// The TargetSet pseudo node relaying to Targets, shared by every call site
+  /// with the same candidate set. InvalidNodeId if Targets is empty.
+  NodeId TargetSetNode = InvalidNodeId;
 };
 
 /// How much of the program the records describe. Counts function nodes only.
@@ -241,7 +267,7 @@ public:
   size_t numFunctions() const { return NumFunctions; }
   bool isFunction(NodeId N) const { return N < NumFunctions; }
 
-  /// Pseudo nodes. See the file comment.
+  /// Pseudo nodes. See the file comment. TargetSet nodes follow these three.
   NodeId externalCallingNode() const { return NumFunctions; }
   NodeId unknownCalleeNode() const { return NumFunctions + 1; }
   NodeId untypedTargetsNode() const { return NumFunctions + 2; }
@@ -253,8 +279,8 @@ public:
     return Nodes[N].DirectCallees;
   }
 
-  /// Union of direct callees, resolved indirect candidates and pseudo-node
-  /// edges, including self-edges.
+  /// Union of direct callees, jump targets and pseudo-node edges, including
+  /// self-edges. Indirect candidates are reached through TargetSet nodes.
   ArrayRef<NodeId> callees(NodeId N) const { return Nodes[N].Callees; }
 
   /// Inverse of callees().
