@@ -32,13 +32,14 @@
 # RUN: ld.lld --call-graph-section -e caller x64-addr.o -o x64-addr
 # RUN: llvm-nm -n x64-addr | FileCheck %s --check-prefix=ADDR
 
-## With a call, only `target` is an indirect candidate: `caller` clusters with
-## `target` and `helper` keeps its place. With an address-take, `helper` joins
-## the cluster ahead of `target`, so a misclassified call fails CALL-NEXT.
+## With a call, only `target` is an indirect candidate: `caller` is immediately
+## followed by `target`, and `helper` is not pulled in between. (`user` has no
+## record, so its call to `helper` becomes a direct edge; where that pair ends
+## up depends on the layout algorithm and is not checked here.) With an
+## address-take, `helper` joins the cluster ahead of `target`, so a
+## misclassified call fails CALL-NEXT.
 # CALL:      T caller
 # CALL-NEXT: T target
-# CALL-NEXT: T helper
-# CALL-NEXT: T user
 
 # ADDR:      T caller
 # ADDR-NEXT: T helper
