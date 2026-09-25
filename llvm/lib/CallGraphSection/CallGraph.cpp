@@ -95,13 +95,22 @@ CallGraph CallGraphBuilder::build() {
       UntypedAddressTaken.push_back(N.Id);
   }
 
-  // Step 3: resolve each indirect call site to its candidate set. Ranges are
-  // recorded first and turned into ArrayRefs afterwards, once the pool has
-  // stopped growing.
-  struct SiteRange {
-    uint64_t TypeId;
+  // Step 3: resolve each indirect call site to its candidate set. The set is
+  // determined by the signature and, only if the caller's module has
+  // module-local candidates for it, by that module; it is computed once per
+  // such key and shared by all sites. Ranges are recorded first and turned
+  // into ArrayRefs afterwards, once the pool has stopped growing.
+  struct SetRange {
     uint32_t Begin;
     uint32_t Size;
+  };
+  std::vector<SetRange> Sets;
+  DenseMap<std::pair<uint64_t, ModuleId>, uint32_t> SetIndex;
+  constexpr uint32_t NoSet = ~uint32_t(0);
+
+  struct SiteRange {
+    uint64_t TypeId;
+    uint32_t Set;
   };
   std::vector<SiteRange> SiteRanges;
 
@@ -112,41 +121,51 @@ CallGraph CallGraphBuilder::build() {
     N.FirstSite = static_cast<uint32_t>(SiteRanges.size());
     N.NumSites = 0;
 
+    auto ModuleIt = LocalTargets.find(N.Module);
     for (uint64_t TypeId : N.IndirectCalleeTypeIds) {
-      SmallVector<NodeId, 8> Candidates;
-
+      ++N.NumSites;
       auto GlobalIt = GlobalTargets.find(TypeId);
-      if (GlobalIt != GlobalTargets.end())
-        Candidates.append(GlobalIt->second.begin(), GlobalIt->second.end());
-
-      auto ModuleIt = LocalTargets.find(N.Module);
+      const SmallVector<NodeId, 4> *Global =
+          GlobalIt != GlobalTargets.end() ? &GlobalIt->second : nullptr;
+      const SmallVector<NodeId, 4> *Local = nullptr;
       if (ModuleIt != LocalTargets.end()) {
         auto LocalIt = ModuleIt->second.find(TypeId);
         if (LocalIt != ModuleIt->second.end())
-          Candidates.append(LocalIt->second.begin(), LocalIt->second.end());
+          Local = &LocalIt->second;
       }
-
-      sortUnique(Candidates);
 
       // A site with no candidates is still recorded: "calls this signature,
       // targets unknown" is meaningful to consumers such as a stack-depth
       // estimator, which must treat it as unbounded.
-      SiteRanges.push_back({TypeId, static_cast<uint32_t>(G.TargetPool.size()),
-                            static_cast<uint32_t>(Candidates.size())});
-      G.TargetPool.insert(G.TargetPool.end(), Candidates.begin(),
-                          Candidates.end());
-      ++N.NumSites;
+      if (!Global && !Local) {
+        SiteRanges.push_back({TypeId, NoSet});
+        continue;
+      }
+
+      auto [It, Inserted] =
+          SetIndex.try_emplace({TypeId, Local ? N.Module : InvalidModuleId},
+                               static_cast<uint32_t>(Sets.size()));
+      if (Inserted) {
+        uint32_t Begin = static_cast<uint32_t>(G.TargetPool.size());
+        if (Global)
+          G.TargetPool.insert(G.TargetPool.end(), Global->begin(),
+                              Global->end());
+        if (Local)
+          G.TargetPool.insert(G.TargetPool.end(), Local->begin(), Local->end());
+        auto Candidates =
+            MutableArrayRef<NodeId>(G.TargetPool).drop_front(Begin);
+        llvm::sort(Candidates);
+        size_t Size = llvm::unique(Candidates) - Candidates.begin();
+        G.TargetPool.resize(Begin + Size);
+        Sets.push_back({Begin, static_cast<uint32_t>(Size)});
+      }
+      SiteRanges.push_back({TypeId, It->second});
     }
   }
 
-  G.Sites.reserve(SiteRanges.size());
-  for (const SiteRange &R : SiteRanges)
-    G.Sites.push_back(
-        IndirectCallSite{R.TypeId, ArrayRef<NodeId>(G.TargetPool)
-                                       .slice(R.Begin, R.Size)});
-
   // Step 4: pseudo nodes. They are non-executable so that layout policies
-  // never treat them as call targets.
+  // never treat them as call targets. TargetSet nodes follow the fixed ones
+  // in order of first use, which is deterministic.
   auto addPseudo = [&](NodeKind Kind) {
     FunctionNode P;
     P.Id = static_cast<NodeId>(G.Nodes.size());
@@ -158,6 +177,25 @@ CallGraph CallGraphBuilder::build() {
   addPseudo(NodeKind::ExternalCalling);
   addPseudo(NodeKind::UnknownCallee);
   addPseudo(NodeKind::UntypedTargets);
+  const NodeId FirstSetNode = static_cast<NodeId>(G.Nodes.size());
+  for (const SetRange &S : Sets) {
+    addPseudo(NodeKind::TargetSet);
+    ArrayRef<NodeId> Targets =
+        ArrayRef<NodeId>(G.TargetPool).slice(S.Begin, S.Size);
+    G.Nodes.back().Callees.assign(Targets.begin(), Targets.end());
+  }
+
+  G.Sites.reserve(SiteRanges.size());
+  for (const SiteRange &R : SiteRanges) {
+    if (R.Set == NoSet) {
+      G.Sites.push_back(IndirectCallSite{R.TypeId, {}, InvalidNodeId});
+      continue;
+    }
+    const SetRange &S = Sets[R.Set];
+    G.Sites.push_back(IndirectCallSite{
+        R.TypeId, ArrayRef<NodeId>(G.TargetPool).slice(S.Begin, S.Size),
+        FirstSetNode + R.Set});
+  }
 
   const NodeId UnknownCallee = G.unknownCalleeNode();
   const NodeId UntypedTargets = G.untypedTargetsNode();
@@ -169,7 +207,8 @@ CallGraph CallGraphBuilder::build() {
     SmallVector<NodeId, 8> All(N.DirectCallees.begin(), N.DirectCallees.end());
     All.append(N.JumpTargets.begin(), N.JumpTargets.end());
     for (const IndirectCallSite &Site : G.indirectCallSites(N.Id))
-      All.append(Site.Targets.begin(), Site.Targets.end());
+      if (Site.TargetSetNode != InvalidNodeId)
+        All.push_back(Site.TargetSetNode);
     if (N.IsExecutable) {
       // Any indirect call may reach a function that cannot be excluded by
       // type.
@@ -193,11 +232,10 @@ CallGraph CallGraphBuilder::build() {
   G.Nodes[UntypedTargets].Callees.assign(UntypedAddressTaken.begin(),
                                          UntypedAddressTaken.end());
 
+  // Callers come out sorted because nodes are visited in increasing order.
   for (const FunctionNode &N : G.Nodes)
     for (NodeId Callee : N.Callees)
       G.Nodes[Callee].Callers.push_back(N.Id);
-  for (FunctionNode &N : G.Nodes)
-    sortUnique(N.Callers);
 
   // Coverage summary.
   CoverageSummary &C = G.Coverage;

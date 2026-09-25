@@ -352,7 +352,63 @@ TEST(CallGraphTest, NoUntypedEdgeWhenEveryTargetIsTyped) {
 
   CallGraph Graph = Builder.build();
 
-  EXPECT_EQ(Graph.callees(Caller), ArrayRef<NodeId>(Typed));
+  // The only indirect edge is the relay to the typed candidate set.
+  const IndirectCallSite &Site = Graph.indirectCallSites(Caller)[0];
+  EXPECT_EQ(Graph.callees(Caller), ArrayRef<NodeId>(Site.TargetSetNode));
+  EXPECT_EQ(Graph.callees(Site.TargetSetNode), ArrayRef<NodeId>(Typed));
+}
+
+TEST(CallGraphTest, CandidateSetsAreSharedBetweenSites) {
+  CallGraphBuilder Builder;
+
+  // Two callers in different modules with the same signature and only global
+  // candidates share one set; a caller whose module has a module-local
+  // candidate gets its own set, which also contains the global ones.
+  NodeId CallerM1 = addCaller(Builder, /*Module=*/1, 0xEEEE);
+  NodeId CallerM2 = addCaller(Builder, /*Module=*/2, 0xEEEE);
+  NodeId CallerM3 = addCaller(Builder, /*Module=*/3, 0xEEEE);
+  NodeId Global = addTarget(Builder, /*Module=*/4, 0xEEEE, /*IsExternal=*/true);
+  Builder.addAddressTakenFact(Global, /*SourceModule=*/4,
+                              /*IsGlobalEscape=*/true);
+  NodeId LocalM3 = addTarget(Builder, /*Module=*/3, 0xEEEE,
+                             /*IsExternal=*/false);
+  Builder.addAddressTakenFact(LocalM3, /*SourceModule=*/3,
+                              /*IsGlobalEscape=*/false);
+  Builder.addRoot(CallerM3);
+
+  CallGraph Graph = Builder.build();
+
+  const IndirectCallSite &S1 = Graph.indirectCallSites(CallerM1)[0];
+  const IndirectCallSite &S2 = Graph.indirectCallSites(CallerM2)[0];
+  const IndirectCallSite &S3 = Graph.indirectCallSites(CallerM3)[0];
+  EXPECT_EQ(S1.TargetSetNode, S2.TargetSetNode);
+  EXPECT_EQ(S1.Targets.data(), S2.Targets.data());
+  EXPECT_EQ(S1.Targets, ArrayRef<NodeId>(Global));
+  EXPECT_NE(S3.TargetSetNode, S1.TargetSetNode);
+  EXPECT_EQ(S3.Targets, ArrayRef<NodeId>({Global, LocalM3}));
+
+  EXPECT_EQ(Graph[S1.TargetSetNode].Kind, NodeKind::TargetSet);
+  EXPECT_FALSE(Graph[S1.TargetSetNode].IsExecutable);
+  EXPECT_EQ(Graph.callers(S1.TargetSetNode),
+            ArrayRef<NodeId>({CallerM1, CallerM2}));
+  // Address-taken, so unknown code may call it too.
+  EXPECT_EQ(Graph.callers(Global),
+            ArrayRef<NodeId>({Graph.unknownCalleeNode(), S1.TargetSetNode,
+                              S3.TargetSetNode}));
+
+  // Paths through the relay are those of the expanded graph.
+  DenseSet<const FunctionNode *> Reachable;
+  const CallGraph *G = &Graph;
+  for (const FunctionNode *N : depth_first(G))
+    Reachable.insert(N);
+  EXPECT_TRUE(Reachable.contains(&Graph[Global]));
+  EXPECT_TRUE(Reachable.contains(&Graph[LocalM3]));
+  EXPECT_FALSE(Reachable.contains(&Graph[CallerM1]));
+
+  // Layout sees each candidate of each site, as before.
+  LayoutWeightConfig Config;
+  size_t NumEdges = computeLayoutEdges(Graph, Config).size();
+  EXPECT_EQ(NumEdges, 4u);
 }
 
 TEST(CallGraphTest, LocalEvidenceScopedToSourceModule) {
