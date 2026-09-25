@@ -13,23 +13,23 @@
 ## AArch64: `user` reaches `helper` with BL (R_AARCH64_CALL26), so `helper` is
 ## not address-taken and `caller` clusters with `target` only.
 # RUN: llvm-mc -filetype=obj -triple=aarch64 a64-call.s -o a64-call.o
-# RUN: ld.lld --call-graph-section-sort -e caller a64-call.o -o a64-call
+# RUN: ld.lld --call-graph-section -e caller a64-call.o -o a64-call
 # RUN: llvm-nm -n a64-call | FileCheck %s --check-prefix=CALL
 
 ## AArch64: `user` materializes the address of `helper` with ADRP+ADD, so
 ## `helper` becomes an indirect candidate too and joins the cluster.
 # RUN: llvm-mc -filetype=obj -triple=aarch64 a64-addr.s -o a64-addr.o
-# RUN: ld.lld --call-graph-section-sort -e caller a64-addr.o -o a64-addr
+# RUN: ld.lld --call-graph-section -e caller a64-addr.o -o a64-addr
 # RUN: llvm-nm -n a64-addr | FileCheck %s --check-prefix=ADDR
 
 ## x86-64: CALL (R_X86_64_PLT32) is not an address-take.
 # RUN: llvm-mc -filetype=obj -triple=x86_64 x64-call.s -o x64-call.o
-# RUN: ld.lld --call-graph-section-sort -e caller x64-call.o -o x64-call
+# RUN: ld.lld --call-graph-section -e caller x64-call.o -o x64-call
 # RUN: llvm-nm -n x64-call | FileCheck %s --check-prefix=CALL
 
 ## x86-64: LEA (R_X86_64_PC32) is an address-take.
 # RUN: llvm-mc -filetype=obj -triple=x86_64 x64-addr.s -o x64-addr.o
-# RUN: ld.lld --call-graph-section-sort -e caller x64-addr.o -o x64-addr
+# RUN: ld.lld --call-graph-section -e caller x64-addr.o -o x64-addr
 # RUN: llvm-nm -n x64-addr | FileCheck %s --check-prefix=ADDR
 
 ## With a call, only `target` is an indirect candidate: `caller` clusters with
