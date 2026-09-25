@@ -6,8 +6,8 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// A whole-program call graph reconstructed from the per-module `.llvm.callgraph`
-// metadata emitted under `-fcall-graph-section`.
+// A whole-program call graph reconstructed from the per-module
+// `.llvm.callgraph` metadata emitted under `-fcall-graph-section`.
 //
 // This header models *facts* only: which functions exist, who calls whom
 // directly, and which functions are plausible targets of each indirect call
@@ -39,8 +39,35 @@
 //      and strongly connected components are observable (a stack-depth
 //      estimator needs this; a layout pass simply ignores self-edges).
 //
-// `GraphTraits` is specialized for `const CallGraph *`, so `df_iterator`,
-// `po_iterator` and `scc_iterator` work directly on the result.
+// Partial coverage
+// ----------------
+//
+// Not every function in a program is described by a record: hand-written
+// assembly, objects built without -fcall-graph-section, and code from other
+// compilers have none. Such a function's outgoing calls are *unknown*, not
+// absent, and without a type ID it cannot be matched by signature. The graph
+// models this soundly with three pseudo nodes, appended after the function
+// nodes, in the style of llvm::CallGraph's external nodes:
+//
+//   - ExternalCallingNode: calls every root registered with addRoot()
+//     (program entry points, exported functions, ...). It is the GraphTraits
+//     entry node, so a depth-first walk from it yields every function that may
+//     execute.
+//   - UnknownCalleeNode: stands for "any code the graph cannot see". It is
+//     called by every function without a record and by every function marked
+//     CallsUnknown (for example because it calls into a shared library), and
+//     it calls every address-taken function, since unknown code may invoke any
+//     function pointer it can obtain.
+//   - UntypedTargetsNode: calls every address-taken function that cannot be
+//     excluded from an indirect call site by type: it has no (complete)
+//     record, is not claimed as an indirect target, or has no type ID. It is
+//     called by every function with an indirect call site.
+//
+// Pseudo-node edges appear only in callees()/callers() (and hence GraphTraits).
+// DirectCallees and IndirectCallSite::Targets stay exact, and pseudo nodes are
+// non-executable, so layout policies built on those are unaffected. Clients
+// that need a sound over-approximation (reachability, stack depth) must treat
+// UnknownCalleeNode as "anything may happen here".
 //
 //===----------------------------------------------------------------------===//
 
@@ -67,21 +94,46 @@ inline constexpr NodeId InvalidNodeId = ~NodeId(0);
 using ModuleId = uint32_t;
 inline constexpr ModuleId InvalidModuleId = 0;
 
+/// Distinguishes real functions from the pseudo nodes described in the file
+/// comment.
+enum class NodeKind : uint8_t {
+  Function,
+  ExternalCalling,
+  UnknownCallee,
+  UntypedTargets,
+};
+
 /// One function in the reconstructed call graph.
 struct FunctionNode {
   /// Index of this node; also its position in CallGraph::nodes().
   NodeId Id = InvalidNodeId;
 
+  /// Set by build(). Clients only ever add NodeKind::Function nodes.
+  NodeKind Kind = NodeKind::Function;
+
   /// Module this function was defined in. Used to scope internal-linkage
   /// indirect targets.
   ModuleId Module = InvalidModuleId;
 
-  /// Generalized function type ID, or 0 if unknown.
-  uint64_t TypeId = 0;
+  /// Generalized function type IDs under which this function may be called
+  /// indirectly. Usually one; a node that stands for several functions (for
+  /// example a section without -ffunction-sections) may have several. Empty
+  /// if unknown.
+  SmallVector<uint64_t, 1> TypeIds;
 
-  /// The producing module believed this function may be called indirectly.
-  /// This is an over-approximation until build() cross-checks it against
-  /// whole-program address-taken evidence.
+  /// A `.llvm.callgraph` record describes this function, so its direct callees
+  /// and indirect call signatures are complete. When false, the function's
+  /// behavior is unknown: build() connects it to UnknownCalleeNode, and it is
+  /// a candidate for every indirect call site if its address is taken.
+  /// DirectCallees may still be supplied (e.g. from relocations); they are
+  /// kept, but are not assumed to be exhaustive.
+  bool HasRecord = false;
+
+  /// The producing module believed this function may be called indirectly,
+  /// under TypeIds. This is an over-approximation until build() cross-checks
+  /// it against whole-program address-taken evidence. For a node standing for
+  /// several functions it must hold for all of them; otherwise leave it false
+  /// and the node is treated as untyped (see UntypedTargetsNode).
   bool IsIndirectTarget = false;
 
   /// The function has non-local linkage (visible outside its module).
@@ -91,6 +143,11 @@ struct FunctionNode {
   /// retained but are never treated as call targets.
   bool IsExecutable = true;
 
+  /// The function may call code that is not represented in the graph, for
+  /// example a function in a shared library or an IFUNC whose implementation
+  /// is chosen at run time. build() connects it to UnknownCalleeNode.
+  bool CallsUnknown = false;
+
   /// Direct callees, as supplied by the client. May contain duplicates and
   /// self-references; build() canonicalizes them.
   SmallVector<NodeId, 4> DirectCallees;
@@ -98,14 +155,23 @@ struct FunctionNode {
   /// Type IDs of the signatures this function calls indirectly.
   SmallVector<uint64_t, 2> IndirectCalleeTypeIds;
 
+  /// Functions this one may transfer control to without calling them, for
+  /// example by branching to the cold part of a function split by
+  /// -fsplit-machine-functions or to another basic block section. Records
+  /// list calls only, so clients supply these from relocations. They are
+  /// part of callees() (and hence reachability), but not of DirectCallees,
+  /// so layout policies do not pull such targets towards this function.
+  SmallVector<NodeId, 0> JumpTargets;
+
   /// @name Populated by CallGraphBuilder::build()
   /// @{
 
   /// True if whole-program evidence confirms the address is taken somewhere.
   bool IsAddressTaken = false;
 
-  /// Deduplicated union of direct callees and resolved indirect candidates.
-  /// Self-edges are preserved. This is the adjacency used by GraphTraits.
+  /// Deduplicated union of direct callees, resolved indirect candidates and
+  /// pseudo-node edges. Self-edges are preserved. This is the adjacency used
+  /// by GraphTraits.
   SmallVector<NodeId, 4> Callees;
 
   /// Reverse of Callees.
@@ -116,6 +182,8 @@ struct FunctionNode {
   uint32_t NumSites = 0;
 
   /// @}
+
+  bool isPseudo() const { return Kind != NodeKind::Function; }
 };
 
 /// The candidate target set of one indirect call signature used by a function.
@@ -123,9 +191,27 @@ struct IndirectCallSite {
   /// Generalized type ID of the callee signature.
   uint64_t TypeId = 0;
 
-  /// Candidate targets, sorted and deduplicated. `Targets.size()` is the
-  /// fan-out of this call site, which consumers use as a confidence signal.
+  /// Candidate targets matched by type, sorted and deduplicated.
+  /// `Targets.size()` is the fan-out of this call site, which consumers use as
+  /// a confidence signal. Functions that cannot be excluded by type (see
+  /// UntypedTargetsNode) are not listed here.
   ArrayRef<NodeId> Targets;
+};
+
+/// How much of the program the records describe. Counts function nodes only.
+struct CoverageSummary {
+  /// Function nodes, i.e. excluding pseudo nodes.
+  size_t NumFunctions = 0;
+  /// Executable functions described by a record.
+  size_t NumWithRecord = 0;
+  /// Executable functions without a record.
+  size_t NumWithoutRecord = 0;
+  /// Functions connected to UnknownCalleeNode (no record, or CallsUnknown).
+  size_t NumCallingUnknown = 0;
+  /// Callees of UnknownCalleeNode: address-taken executable functions.
+  size_t NumAddressTaken = 0;
+  /// Callees of UntypedTargetsNode.
+  size_t NumUntypedAddressTaken = 0;
 };
 
 /// A reconstructed whole-program call graph. Produced by CallGraphBuilder.
@@ -141,10 +227,24 @@ public:
   CallGraph(const CallGraph &) = delete;
   CallGraph &operator=(const CallGraph &) = delete;
 
+  /// All nodes: function nodes first (NodeIds as assigned by the builder),
+  /// followed by the pseudo nodes.
   ArrayRef<FunctionNode> nodes() const { return Nodes; }
   size_t size() const { return Nodes.size(); }
   bool empty() const { return Nodes.empty(); }
   bool isValid(NodeId N) const { return N < Nodes.size(); }
+
+  /// Function nodes only, i.e. the nodes the client added.
+  ArrayRef<FunctionNode> functions() const {
+    return ArrayRef<FunctionNode>(Nodes).take_front(NumFunctions);
+  }
+  size_t numFunctions() const { return NumFunctions; }
+  bool isFunction(NodeId N) const { return N < NumFunctions; }
+
+  /// Pseudo nodes. See the file comment.
+  NodeId externalCallingNode() const { return NumFunctions; }
+  NodeId unknownCalleeNode() const { return NumFunctions + 1; }
+  NodeId untypedTargetsNode() const { return NumFunctions + 2; }
 
   const FunctionNode &operator[](NodeId N) const { return Nodes[N]; }
 
@@ -153,8 +253,8 @@ public:
     return Nodes[N].DirectCallees;
   }
 
-  /// Union of direct callees and resolved indirect candidates, including
-  /// self-edges.
+  /// Union of direct callees, resolved indirect candidates and pseudo-node
+  /// edges, including self-edges.
   ArrayRef<NodeId> callees(NodeId N) const { return Nodes[N].Callees; }
 
   /// Inverse of callees().
@@ -167,12 +267,16 @@ public:
                                                    Node.NumSites);
   }
 
+  const CoverageSummary &coverage() const { return Coverage; }
+
 private:
   friend class CallGraphBuilder;
 
   std::vector<FunctionNode> Nodes;
   std::vector<IndirectCallSite> Sites;
   std::vector<NodeId> TargetPool;
+  size_t NumFunctions = 0;
+  CoverageSummary Coverage;
 };
 
 /// Accumulates facts about functions and their references, then reconstructs
@@ -198,6 +302,12 @@ public:
   void addAddressTakenFact(NodeId Target, ModuleId SourceModule,
                            bool IsGlobalEscape);
 
+  /// Record that \p N may be invoked from outside the graph without being
+  /// called by any function in it: a program entry point, an exported
+  /// function, a constructor, etc. Roots become callees of
+  /// ExternalCallingNode.
+  void addRoot(NodeId N);
+
   /// Resolve indirect call sites and materialize the graph. The builder may
   /// be discarded afterwards.
   CallGraph build();
@@ -206,6 +316,7 @@ private:
   std::vector<FunctionNode> Nodes;
   DenseSet<NodeId> GloballyAddressTaken;
   DenseMap<ModuleId, DenseSet<NodeId>> LocallyAddressTaken;
+  SmallVector<NodeId, 0> Roots;
 };
 
 /// Maps an adjacency entry to its node pointer. Implementation detail of
@@ -217,6 +328,7 @@ struct NodeIdToPointer {
 
 } // namespace callgraph
 
+/// The entry node is ExternalCallingNode, so graph walks start from the roots.
 template <> struct GraphTraits<const callgraph::CallGraph *> {
   using NodeRef = const callgraph::FunctionNode *;
   using ChildIteratorType =
@@ -224,7 +336,7 @@ template <> struct GraphTraits<const callgraph::CallGraph *> {
   using nodes_iterator = pointer_iterator<const callgraph::FunctionNode *>;
 
   static NodeRef getEntryNode(const callgraph::CallGraph *G) {
-    return G->nodes().begin();
+    return G->nodes().begin() + G->externalCallingNode();
   }
 
   static ChildIteratorType child_begin(NodeRef N) {
