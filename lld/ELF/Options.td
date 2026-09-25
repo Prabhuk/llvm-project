@@ -146,11 +146,13 @@ def : FF<"no-call-graph-profile-sort">, Alias<call_graph_profile_sort>, AliasArg
   Flags<[HelpHidden]>;
 
 def call_graph_section: JJ<"call-graph-section=">,
-  HelpText<"Use the call graph reconstructed from .llvm.callgraph sections instead of a measured profile as the edge source for --call-graph-profile-sort (default: none)">,
-  MetaVarName<"[none,only]">,
-  Values<"none,only">;
-def : FF<"call-graph-section">, Alias<call_graph_section>, AliasArgs<["only"]>,
-  HelpText<"Alias for --call-graph-section=only">;
+  HelpText<"Use the call graph reconstructed from .llvm.callgraph sections as an edge source for --call-graph-profile-sort. "
+           "auto: sections covered by a measured profile keep their layout and the remaining sections are laid out using the static call graph; "
+           "only: use only the static call graph (default: none)">,
+  MetaVarName<"[none,auto,only]">,
+  Values<"none,auto,only">;
+def : FF<"call-graph-section">, Alias<call_graph_section>, AliasArgs<["auto"]>,
+  HelpText<"Alias for --call-graph-section=auto">;
 def : FF<"no-call-graph-section">, Alias<call_graph_section>, AliasArgs<["none"]>,
   Flags<[HelpHidden]>;
 

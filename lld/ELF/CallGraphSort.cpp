@@ -27,6 +27,7 @@
 #include "InputFiles.h"
 #include "InputSection.h"
 #include "Symbols.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Transforms/Utils/CodeLayout.h"
 
@@ -35,6 +36,10 @@
 using namespace llvm;
 using namespace lld;
 using namespace lld::elf;
+
+using SectionPair =
+    std::pair<const InputSectionBase *, const InputSectionBase *>;
+using EdgeMap = MapVector<SectionPair, uint64_t>;
 
 namespace {
 struct Edge {
@@ -88,12 +93,11 @@ struct Cluster {
 /// * Sort non-empty clusters by density
 class CallGraphSort {
 public:
-  CallGraphSort(Ctx &);
+  CallGraphSort(const EdgeMap &profile);
 
-  DenseMap<const InputSectionBase *, int> run();
+  SmallVector<const InputSectionBase *, 0> run();
 
 private:
-  Ctx &ctx;
   std::vector<Cluster> clusters;
   std::vector<const InputSectionBase *> sections;
 };
@@ -106,14 +110,9 @@ constexpr int MAX_DENSITY_DEGRADATION = 8;
 constexpr uint64_t MAX_CLUSTER_SIZE = 1024 * 1024;
 } // end anonymous namespace
 
-using SectionPair =
-    std::pair<const InputSectionBase *, const InputSectionBase *>;
-
-// Take the edge list in ctx.arg.callGraphProfile, resolve symbol names to
-// Symbols, and generate a graph between InputSections with the provided
-// weights.
-CallGraphSort::CallGraphSort(Ctx &ctx) : ctx(ctx) {
-  MapVector<SectionPair, uint64_t> &profile = ctx.arg.callGraphProfile;
+// Take the edge list in \p profile and generate a graph between InputSections
+// with the provided weights.
+CallGraphSort::CallGraphSort(const EdgeMap &profile) {
   DenseMap<const InputSectionBase *, int> secToCluster;
 
   auto getOrCreateNode = [&](const InputSectionBase *isec) -> int {
@@ -126,7 +125,7 @@ CallGraphSort::CallGraphSort(Ctx &ctx) : ctx(ctx) {
   };
 
   // Create the graph.
-  for (std::pair<SectionPair, uint64_t> &c : profile) {
+  for (const std::pair<SectionPair, uint64_t> &c : profile) {
     const auto *fromSB = cast<InputSectionBase>(c.first.first);
     const auto *toSB = cast<InputSectionBase>(c.first.second);
     uint64_t weight = c.second;
@@ -190,8 +189,8 @@ static void mergeClusters(std::vector<Cluster> &cs, Cluster &into, int intoIdx,
 }
 
 // Group InputSections into clusters using the Call-Chain Clustering heuristic
-// then sort the clusters by density.
-DenseMap<const InputSectionBase *, int> CallGraphSort::run() {
+// then sort the clusters by density. Returns the sections in layout order.
+SmallVector<const InputSectionBase *, 0> CallGraphSort::run() {
   std::vector<int> sorted(clusters.size());
   std::unique_ptr<int[]> leaders(new int[clusters.size()]);
 
@@ -234,50 +233,24 @@ DenseMap<const InputSectionBase *, int> CallGraphSort::run() {
     return clusters[a].getDensity() > clusters[b].getDensity();
   });
 
-  DenseMap<const InputSectionBase *, int> orderMap;
-  int curOrder = -clusters.size();
+  SmallVector<const InputSectionBase *, 0> order;
+  order.reserve(clusters.size());
   for (int leader : sorted) {
     for (int i = leader;;) {
-      orderMap[sections[i]] = curOrder++;
+      order.push_back(sections[i]);
       i = clusters[i].next;
       if (i == leader)
         break;
     }
   }
-  if (!ctx.arg.printSymbolOrder.empty()) {
-    std::error_code ec;
-    raw_fd_ostream os(ctx.arg.printSymbolOrder, ec, sys::fs::OF_None);
-    if (ec) {
-      ErrAlways(ctx) << "cannot open " << ctx.arg.printSymbolOrder << ": "
-                     << ec.message();
-      return orderMap;
-    }
-
-    // Print the symbols ordered by C3, in the order of increasing curOrder
-    // Instead of sorting all the orderMap, just repeat the loops above.
-    for (int leader : sorted)
-      for (int i = leader;;) {
-        // Search all the symbols in the file of the section
-        // and find out a Defined symbol with name that is within the section.
-        for (Symbol *sym : sections[i]->file->getSymbols())
-          if (!sym->isSection()) // Filter out section-type symbols here.
-            if (auto *d = dyn_cast<Defined>(sym))
-              if (sections[i] == d->section)
-                os << sym->getName() << "\n";
-        i = clusters[i].next;
-        if (i == leader)
-          break;
-      }
-  }
-
-  return orderMap;
+  return order;
 }
 
 // Sort sections by the profile data using the Cache-Directed Sort algorithm.
 // The placement is done by optimizing the locality by co-locating frequently
-// executed code sections together.
-static DenseMap<const InputSectionBase *, int>
-computeCacheDirectedSortOrder(Ctx &ctx) {
+// executed code sections together. Returns the sections in layout order.
+static SmallVector<const InputSectionBase *, 0>
+computeCacheDirectedSortOrder(const EdgeMap &profile) {
   SmallVector<uint64_t, 0> funcSizes;
   SmallVector<uint64_t, 0> funcCounts;
   SmallVector<codelayout::EdgeCount, 0> callCounts;
@@ -297,7 +270,7 @@ computeCacheDirectedSortOrder(Ctx &ctx) {
   };
 
   // Create the graph.
-  for (std::pair<SectionPair, uint64_t> &c : ctx.arg.callGraphProfile) {
+  for (const std::pair<SectionPair, uint64_t> &c : profile) {
     const InputSectionBase *fromSB = cast<InputSectionBase>(c.first.first);
     const InputSectionBase *toSB = cast<InputSectionBase>(c.first.second);
     // Ignore edges between input sections belonging to different sections.
@@ -326,22 +299,93 @@ computeCacheDirectedSortOrder(Ctx &ctx) {
   std::vector<uint64_t> sortedSections = codelayout::computeCacheDirectedLayout(
       funcSizes, funcCounts, callCounts, callOffsets);
 
-  // Create the final order.
-  DenseMap<const InputSectionBase *, int> orderMap;
-  int curOrder = -sortedSections.size();
+  SmallVector<const InputSectionBase *, 0> order;
+  order.reserve(sortedSections.size());
   for (uint64_t secIdx : sortedSections)
-    orderMap[sections[secIdx]] = curOrder++;
-
-  return orderMap;
+    order.push_back(sections[secIdx]);
+  return order;
 }
 
-// Sort sections by the profile data provided by --callgraph-profile-file.
+static SmallVector<const InputSectionBase *, 0>
+computeOrder(CGProfileSortKind kind, const EdgeMap &profile) {
+  if (kind == CGProfileSortKind::Cdsort)
+    return computeCacheDirectedSortOrder(profile);
+  return CallGraphSort(profile).run();
+}
+
+static void printSymbolOrder(Ctx &ctx,
+                             ArrayRef<const InputSectionBase *> order) {
+  std::error_code ec;
+  raw_fd_ostream os(ctx.arg.printSymbolOrder, ec, sys::fs::OF_None);
+  if (ec) {
+    ErrAlways(ctx) << "cannot open " << ctx.arg.printSymbolOrder << ": "
+                   << ec.message();
+    return;
+  }
+  for (const InputSectionBase *isec : order) {
+    // Search all the symbols in the file of the section
+    // and find out a Defined symbol with name that is within the section.
+    for (Symbol *sym : isec->file->getSymbols())
+      if (!sym->isSection()) // Filter out section-type symbols here.
+        if (auto *d = dyn_cast<Defined>(sym))
+          if (isec == d->section)
+            os << sym->getName() << "\n";
+  }
+}
+
+// Sort sections by call graph edges, using the C³ or Cache-Directed-Sort
+// algorithm selected by --call-graph-profile-sort.
 //
-// This first builds a call graph based on the profile data then merges sections
-// according either to the C³ or Cache-Directed-Sort ordering algorithm.
-DenseMap<const InputSectionBase *, int>
-elf::computeCallGraphProfileOrder(Ctx &ctx) {
-  if (ctx.arg.callGraphProfileSort == CGProfileSortKind::Cdsort)
-    return computeCacheDirectedSortOrder(ctx);
-  return CallGraphSort(ctx).run();
+// Edges come from two sources that are laid out as two tiers:
+//
+//  1. Measured profile edges (--call-graph-ordering-file or
+//     SHT_LLVM_CALL_GRAPH_PROFILE). This tier is computed from exactly the same
+//     input as when --call-graph-section is not given, so the relative order of
+//     these sections is unchanged.
+//
+//  2. Static edges reconstructed from SHT_LLVM_CALL_GRAPH sections
+//     (--call-graph-section). Only edges whose endpoints were both left
+//     unplaced by tier 1 participate, and every tier 2 section is placed after
+//     every tier 1 section. The measured profile therefore stays authoritative
+//     for the code it covers, and the static graph organizes the rest.
+//
+// With --call-graph-section=only, tier 1 is empty and the static graph drives
+// the whole layout.
+//
+// Tier 2 sections are reported in \p secondary so that sortISDBySectionOrder
+// can place the other ordered sections (tier 1 and --symbol-ordering-file)
+// exactly where they would be without them.
+DenseMap<const InputSectionBase *, int> elf::computeCallGraphProfileOrder(
+    Ctx &ctx, DenseSet<const InputSectionBase *> &secondary) {
+  CGProfileSortKind kind = ctx.arg.callGraphProfileSort;
+
+  SmallVector<const InputSectionBase *, 0> order;
+  if (!ctx.arg.callGraphProfile.empty())
+    order = computeOrder(kind, ctx.arg.callGraphProfile);
+
+  if (!ctx.arg.callGraphSectionProfile.empty()) {
+    DenseSet<const InputSectionBase *> placed(order.begin(), order.end());
+    EdgeMap residual;
+    for (const std::pair<SectionPair, uint64_t> &c :
+         ctx.arg.callGraphSectionProfile)
+      if (!placed.contains(c.first.first) && !placed.contains(c.first.second))
+        residual.insert(c);
+    if (!residual.empty()) {
+      SmallVector<const InputSectionBase *, 0> tier2 =
+          computeOrder(kind, residual);
+      secondary.insert(tier2.begin(), tier2.end());
+      order.append(tier2);
+    }
+  }
+
+  DenseMap<const InputSectionBase *, int> orderMap;
+  int curOrder = -order.size();
+  for (const InputSectionBase *isec : order)
+    orderMap[isec] = curOrder++;
+
+  // Only C³ has historically honored --print-symbol-order.
+  if (kind == CGProfileSortKind::Hfsort && !ctx.arg.printSymbolOrder.empty())
+    printSymbolOrder(ctx, order);
+
+  return orderMap;
 }

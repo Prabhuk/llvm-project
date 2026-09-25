@@ -1189,7 +1189,7 @@ static bool isDirectBranchRelocation(uint16_t machine, uint32_t type) {
 }
 
 // Reconstruct a whole-program call graph from SHT_LLVM_CALL_GRAPH sections
-// and use it to populate ctx.arg.callGraphProfile.
+// and use it to populate ctx.arg.callGraphSectionProfile.
 //
 // LLD's role is to supply facts only the linker can establish -- module
 // membership, effective linkage, address-taken evidence from relocations, and
@@ -1476,7 +1476,7 @@ static void readCallGraphFromCallGraphSection(Ctx &ctx) {
     InputSectionBase *from = nodeToSection[edge.From];
     InputSectionBase *to = nodeToSection[edge.To];
     if (from->isLive() && to->isLive())
-      ctx.arg.callGraphProfile[{from, to}] += edge.Weight;
+      ctx.arg.callGraphSectionProfile[{from, to}] += edge.Weight;
   }
 }
 
@@ -1558,6 +1558,8 @@ static CGProfileSortKind getCGProfileSortKind(Ctx &ctx,
 static CallGraphSectionMode getCallGraphSectionMode(Ctx &ctx,
                                                     opt::InputArgList &args) {
   StringRef s = args.getLastArgValue(OPT_call_graph_section, "none");
+  if (s == "auto")
+    return CallGraphSectionMode::Auto;
   if (s == "only")
     return CallGraphSectionMode::Only;
   if (s != "none")
@@ -3974,19 +3976,24 @@ template <class ELFT> void LinkerDriver::link(opt::InputArgList &args) {
     doIcf<ELFT>(ctx);
   }
 
-  // Read the callgraph now that we know what was gced or icfed
+  // Read the callgraph now that we know what was gced or icfed. Measured
+  // profile edges and static SHT_LLVM_CALL_GRAPH edges are kept in separate
+  // maps; computeCallGraphProfileOrder decides how they are combined.
   if (ctx.arg.callGraphProfileSort != CGProfileSortKind::None) {
-    if (ctx.arg.callGraphSection == CallGraphSectionMode::Only) {
-      if (args.hasArg(OPT_call_graph_ordering_file))
-        Warn(ctx) << "--call-graph-ordering-file is ignored with "
-                     "--call-graph-section=only";
+    if (ctx.arg.callGraphSection != CallGraphSectionMode::Only) {
+      if (auto *arg = args.getLastArg(OPT_call_graph_ordering_file)) {
+        if (std::optional<MemoryBufferRef> buffer =
+                readFile(ctx, arg->getValue()))
+          readCallGraph(ctx, *buffer);
+      } else {
+        readCallGraphsFromObjectFiles<ELFT>(ctx);
+      }
+    } else if (args.hasArg(OPT_call_graph_ordering_file)) {
+      Warn(ctx) << "--call-graph-ordering-file is ignored with "
+                   "--call-graph-section=only";
+    }
+    if (ctx.arg.callGraphSection != CallGraphSectionMode::None)
       readCallGraphFromCallGraphSection<ELFT>(ctx);
-    } else if (auto *arg = args.getLastArg(OPT_call_graph_ordering_file)) {
-      if (std::optional<MemoryBufferRef> buffer =
-              readFile(ctx, arg->getValue()))
-        readCallGraph(ctx, *buffer);
-    } else
-      readCallGraphsFromObjectFiles<ELFT>(ctx);
   }
 
   // Write the result to the file.

@@ -15,7 +15,7 @@
 # RUN: ld.lld --call-graph-section=only --call-graph-profile-sort=hfsort -e A single.o -o single3
 # RUN: llvm-nm -n single3 | FileCheck %s --check-prefix=SORTED
 
-## --call-graph-section (only; the sort algorithm defaults to cdsort) clusters sections.
+## --call-graph-section (auto; the sort algorithm defaults to cdsort) clusters sections.
 # RUN: ld.lld --call-graph-section -e A single.o -o single4
 # RUN: llvm-nm -n single4 | FileCheck %s --check-prefix=SORTED
 
