@@ -27,6 +27,16 @@
 #include "src/__support/macros/config.h"
 #include "src/__support/macros/optimization.h" // LIBC_UNLIKELY
 
+// In size-optimized builds that skip the accurate pass, reuse the shared
+// double-precision exp2 evaluation (and its small EXP2_MID table) instead of
+// the 2 x 64-entry EXP2_MID1 / EXP2_MID2 TripleDouble tables.
+#if defined(LIBC_MATH_HAS_SKIP_ACCURATE_PASS) &&                               \
+    (defined(LIBC_MATH_HAS_SMALL_TABLES) ||                                    \
+     defined(LIBC_MATH_HAS_INTERMEDIATE_COMP_IN_FLOAT))
+#define LIBC_MATH_EXP_USE_EXP2_EVAL
+#include "src/__support/math/exp_double_utils.h"
+#endif
+
 namespace LIBC_NAMESPACE_DECL {
 
 namespace math {
@@ -59,6 +69,19 @@ LIBC_INLINE_VAR constexpr double EXP_ERR_DD = 0x1.0p-99;
 // Errors < 1.5 * 2^-133
 LIBC_INLINE_VAR constexpr double MLOG_2_EXP2_M12_HI = -0x1.62e42ffp-13;
 LIBC_INLINE_VAR constexpr double MLOG_2_EXP2_M12_MID = 0x1.718432a1b0e26p-47;
+
+#ifdef LIBC_MATH_EXP_USE_EXP2_EVAL
+// -log(2) * 2^-N with N = double_eval::EXP_N_BITS (3 with
+// LIBC_MATH_HAS_SMALL_TABLES, 7 otherwise), obtained by exactly scaling the
+// constants above by 2^(12 - N):
+//   |-log(2) * 2^-N - (MLOG_2_HI + MLOG_2_MID)| < 2^(12 - N) * 2^-101.
+// MLOG_2_HI has 29 significant bits, so kd * MLOG_2_HI is exact for
+// |kd| < 2^24.
+LIBC_INLINE_VAR constexpr double MLOG_2_HI =
+    MLOG_2_EXP2_M12_HI * (0x1.0p12 * double_eval::EXP_SCALE_INV);
+LIBC_INLINE_VAR constexpr double MLOG_2_MID =
+    MLOG_2_EXP2_M12_MID * (0x1.0p12 * double_eval::EXP_SCALE_INV);
+#endif // LIBC_MATH_EXP_USE_EXP2_EVAL
 
 #ifndef LIBC_MATH_HAS_SKIP_ACCURATE_PASS
 LIBC_INLINE_VAR constexpr double MLOG_2_EXP2_M12_MID_30 = 0x1.718432ap-47;
@@ -266,6 +289,41 @@ LIBC_INLINE double exp(double x) {
 
   // Now log(2^-1075) <= x <= -2^-53 or 2^-53 <= x < log(2^1023 * (2 - 2^-52))
 
+#ifdef LIBC_MATH_EXP_USE_EXP2_EVAL
+  // Range reduction:
+  // Let N = double_eval::EXP_N_BITS (3 with LIBC_MATH_HAS_SMALL_TABLES, 7
+  // otherwise), and:
+  //   k = round(x * log2(e) * 2^N)
+  //   hi = k >> N
+  //   idx = k & (2^N - 1)
+  //   u = x - k * log(2) * 2^-N
+  // then:
+  //   exp(x) = 2^hi * 2^(idx * 2^-N) * exp(u),
+  // which is evaluated by double_eval::exp2_eval using the 2^N-entry EXP2_MID
+  // table shared with exp2.
+  //
+  // Since |x| < 1.5 * 2^9 and |log2(e) - LOG2_E| < 1.5 * 2^-56, the errors in
+  // computing x * LOG2_E * 2^N in double precision (in any rounding mode) are
+  // bounded by 2^N * 2^-41.8, so:
+  //   |u| < log(2) * (2^-(N + 1) + 2^-41.8),
+  // and |k| < 1076 * 2^N < 2^18.
+  double kd = fputil::nearest_integer(x * (LOG2_E * double_eval::EXP_SCALE));
+  int k = static_cast<int>(kd);
+  int hi = k >> double_eval::EXP_N_BITS;
+  unsigned idx = static_cast<unsigned>(k & double_eval::EXP_MASK);
+
+  // Two-step Cody-Waite reduction:
+  // - kd * MLOG_2_HI is exact, and so is x + kd * MLOG_2_HI: it is a multiple
+  //   of min(ulp(x), 2^(-29 - N)) >= 2^(-54 - N) (when k != 0,
+  //   |x| > 2^(-N - 2)) whose magnitude is less than 2^-(N + 1).
+  // - The representation error of MLOG_2_HI + MLOG_2_MID contributes at most
+  //   |k| * 2^(12 - N) * 2^-101 < 2^-79, and the last rounding contributes at
+  //   most 2^-52 * |u|.
+  double u_hi = fputil::multiply_add(kd, MLOG_2_HI, x); // exact
+  double u = fputil::multiply_add(kd, MLOG_2_MID, u_hi);
+
+  return double_eval::exp2_eval(x, u, hi, idx);
+#else
   // Range reduction:
   // Let x = log(2) * (hi + mid1 + mid2) + lo
   // in which:
@@ -445,10 +503,13 @@ LIBC_INLINE double exp(double x) {
 
   return static_cast<double>(r_f128);
 #endif // LIBC_MATH_HAS_SKIP_ACCURATE_PASS
+#endif // LIBC_MATH_EXP_USE_EXP2_EVAL
 }
 
 } // namespace math
 
 } // namespace LIBC_NAMESPACE_DECL
+
+#undef LIBC_MATH_EXP_USE_EXP2_EVAL
 
 #endif // LLVM_LIBC_SRC___SUPPORT_MATH_EXP_H
