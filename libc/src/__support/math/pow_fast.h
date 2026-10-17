@@ -24,6 +24,7 @@
 #include "src/__support/macros/properties/cpu_features.h"
 #include "src/__support/math/common_constants.h"
 #include "src/__support/math/exp_constants.h"
+#include "src/__support/math/log2_double_utils.h"
 #include "src/__support/math/pow_utils.h"
 
 namespace LIBC_NAMESPACE_DECL {
@@ -68,6 +69,13 @@ LIBC_INLINE double pow(double x, double y) {
   //     = 2^( y * ( e_x + log2(m_x) ) )
   // First we compute log2(x) = e_x + log2(m_x)
 
+#ifdef LIBC_MATH_HAS_SMALL_TABLES
+  // Use the shared double-double log2 evaluation with 16-entry range reduction
+  // tables from log2_double_utils.h instead of RD/CD and LOG2_R_DD below.  The
+  // relative error of log2_x is bounded by ~2^-66, which keeps the error of
+  // y * log2(x) (|y * log2(x)| <= 1076 here) below 2^-55.5 in absolute terms.
+  DoubleDouble log2_x = double_eval::log2_eval_dd(e_x, x_mant);
+#else
   // Extract exponent field of x.
 
   // Use the highest 7 fractional bits of m_x as the index for look up tables.
@@ -151,6 +159,7 @@ LIBC_INLINE double pow(double x, double y) {
 
   DoubleDouble log2_x = fputil::exact_add(log2_x_hi.hi, log2_x_lo);
   log2_x.lo += log2_x_hi.lo;
+#endif // LIBC_MATH_HAS_SMALL_TABLES
 
   // To compute 2^(y * log2(x)), we break the exponent into 3 parts:
   //   y * log2(x) = hi + mid + lo, where

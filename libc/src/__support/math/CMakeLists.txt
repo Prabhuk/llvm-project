@@ -5589,6 +5589,7 @@ add_header_library(
     .common_constants
     .exp_constants
     .exp2
+    .log2_double_utils
     libc.hdr.errno_macros
     libc.hdr.fenv_macros
     libc.src.__support.CPP.bit
