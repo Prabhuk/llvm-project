@@ -27,6 +27,16 @@
 #include "src/__support/macros/config.h"
 #include "src/__support/macros/optimization.h" // LIBC_UNLIKELY
 
+// In size-optimized builds that skip the accurate pass, reuse the shared
+// double-precision exp2 evaluation (and its small EXP2_MID table) instead of
+// the 2 x 64-entry EXP2_MID1 / EXP2_MID2 TripleDouble tables.
+#if defined(LIBC_MATH_HAS_SKIP_ACCURATE_PASS) &&                               \
+    (defined(LIBC_MATH_HAS_SMALL_TABLES) ||                                    \
+     defined(LIBC_MATH_HAS_INTERMEDIATE_COMP_IN_FLOAT))
+#define LIBC_MATH_EXP10_USE_EXP2_EVAL
+#include "src/__support/math/exp_double_utils.h"
+#endif
+
 namespace LIBC_NAMESPACE_DECL {
 
 using fputil::DoubleDouble;
@@ -46,6 +56,23 @@ LIBC_INLINE_VAR constexpr double LOG2_10 = 0x1.a934f0979a371p+1;
 // Errors < 1.5 * 2^-144
 LIBC_INLINE_VAR constexpr double MLOG10_2_EXP2_M12_HI = -0x1.3441350ap-14;
 LIBC_INLINE_VAR constexpr double MLOG10_2_EXP2_M12_MID = 0x1.0c0219dc1da99p-51;
+
+#ifdef LIBC_MATH_EXP10_USE_EXP2_EVAL
+// -log10(2) * 2^-N with N = math::double_eval::EXP_N_BITS (3 with
+// LIBC_MATH_HAS_SMALL_TABLES, 7 otherwise), obtained by exactly scaling the
+// constants above by 2^(12 - N):
+//   |-log10(2) * 2^-N - (MLOG10_2_HI + MLOG10_2_MID)| < 2^(12 - N) * 2^-104.
+// MLOG10_2_HI has 32 significant bits, so kd * MLOG10_2_HI is exact for
+// |kd| < 2^21.
+LIBC_INLINE_VAR constexpr double MLOG10_2_HI =
+    MLOG10_2_EXP2_M12_HI * (0x1.0p12 * math::double_eval::EXP_SCALE_INV);
+LIBC_INLINE_VAR constexpr double MLOG10_2_MID =
+    MLOG10_2_EXP2_M12_MID * (0x1.0p12 * math::double_eval::EXP_SCALE_INV);
+// log(10) = LN_10 + O(2^-52)
+LIBC_INLINE_VAR constexpr double LN_10 = 0x1.26bb1bbb55516p1;
+// MLOG10_2_MID * log(10), with relative errors < 2^-52.
+LIBC_INLINE_VAR constexpr double MLOG10_2_MID_LN_10 = MLOG10_2_MID * LN_10;
+#endif // LIBC_MATH_EXP10_USE_EXP2_EVAL
 
 #ifndef LIBC_MATH_HAS_SKIP_ACCURATE_PASS
 LIBC_INLINE_VAR constexpr double MLOG10_2_EXP2_M12_MID_32 = 0x1.0c0219dcp-51;
@@ -179,8 +206,56 @@ LIBC_INLINE DoubleDouble exp10_double_double(double x, double kd,
 }
 #endif // LIBC_MATH_HAS_SKIP_ACCURATE_PASS
 
+#ifdef LIBC_MATH_EXP10_USE_EXP2_EVAL
+// Compute 10^x for log10(2^-1075) < x < log10(2^1024) with
+// math::double_eval::exp2_eval.
+LIBC_INLINE double exp10_exp2_eval(double x) {
+  // Range reduction:
+  // Let N = math::double_eval::EXP_N_BITS (3 with LIBC_MATH_HAS_SMALL_TABLES,
+  // 7 otherwise), and:
+  //   k = round(x * log2(10) * 2^N)
+  //   hi = k >> N
+  //   idx = k & (2^N - 1)
+  //   dx = x - k * log10(2) * 2^-N
+  //   u = dx * log(10)
+  // then:
+  //   10^x = 2^hi * 2^(idx * 2^-N) * exp(u),
+  // which is evaluated by math::double_eval::exp2_eval using the 2^N-entry
+  // EXP2_MID table shared with exp2.
+  //
+  // Since |x| < 2^9 and |log2(10) - LOG2_10| < 2^-51, the errors in computing
+  // x * LOG2_10 * 2^N in double precision (in any rounding mode) are bounded
+  // by 2^N * 2^-41.9, so:
+  //   |u| < log(2) * (2^-(N + 1) + 2^-41.9),
+  // and |k| < 1076 * 2^N < 2^18.
+  double kd =
+      fputil::nearest_integer(x * (LOG2_10 * math::double_eval::EXP_SCALE));
+  int k = static_cast<int>(kd);
+  int hi = k >> math::double_eval::EXP_N_BITS;
+  unsigned idx = static_cast<unsigned>(k & math::double_eval::EXP_MASK);
+
+  // Two-step Cody-Waite reduction:
+  // - kd * MLOG10_2_HI is exact, and so is x + kd * MLOG10_2_HI: it is a
+  //   multiple of min(ulp(x), 2^(-33 - N)) >= 2^(-55 - N) (when k != 0,
+  //   |x| > 2^(-N - 3)) whose magnitude is less than 2^-(N + 2).
+  // - u = log(10) * (dx_hi + kd * MLOG10_2_MID) is computed with errors
+  //   bounded by:
+  //     |kd| * 2^(12 - N) * 2^-104 * log(10)       < 2^-81  (MLOG10_2_*)
+  //     2^-52 * |kd * MLOG10_2_MID_LN_10|           < 2^-79  (product)
+  //     2^-53.2 * |u|                                        (LN_10)
+  //     2^-52 * |u| (2^-51 * |u| without FMA)                (rounding)
+  double dx_hi = fputil::multiply_add(kd, MLOG10_2_HI, x); // exact
+  double u = fputil::multiply_add(dx_hi, LN_10, kd * MLOG10_2_MID_LN_10);
+
+  return math::double_eval::exp2_eval(x, u, hi, idx);
+}
+#endif // LIBC_MATH_EXP10_USE_EXP2_EVAL
+
 // When output is denormal.
 LIBC_INLINE double exp10_denorm(double x) {
+#ifdef LIBC_MATH_EXP10_USE_EXP2_EVAL
+  return exp10_exp2_eval(x);
+#else
   // Range reduction.
   double tmp = fputil::multiply_add(x, LOG2_10, 0x1.8000'0000'4p21);
   int k = static_cast<int>(cpp::bit_cast<uint64_t>(tmp) >> 19);
@@ -241,6 +316,7 @@ LIBC_INLINE double exp10_denorm(double x) {
 
   return static_cast<double>(r_f128);
 #endif // LIBC_MATH_HAS_SKIP_ACCURATE_PASS
+#endif // LIBC_MATH_EXP10_USE_EXP2_EVAL
 }
 
 // Check for exceptional cases when:
@@ -320,6 +396,25 @@ LIBC_INLINE double exp10(double x) {
   // Now log10(2^-1075) < x <= log10(1 - 2^-54) or
   //     log10(1 + 2^-53) < x < log10(2^1024)
 
+#ifdef LIBC_MATH_EXP10_USE_EXP2_EVAL
+  // 10^n is exactly representable for integers 1 <= n <= 22.  Return these
+  // exactly in all rounding modes, since the errors of exp10_exp2_eval are up
+  // to ~1.6 ULPs.  The quick check (x_u & 0x8000'ffff'ffff'ffff) == 0 selects
+  // positive x with at most 4 explicit mantissa bits, which includes all such
+  // integers.  All intermediate products 10^i, i <= 22, are exact.
+  if (LIBC_UNLIKELY((x_u & 0x8000'ffff'ffff'ffffULL) == 0 && x <= 22.0)) {
+    int n = static_cast<int>(x);
+    if (static_cast<double>(n) == x) {
+      double r = 1.0;
+      LIBC_LOOP_NOUNROLL
+      for (int i = 0; i < n; ++i)
+        r *= 10.0;
+      return r;
+    }
+  }
+
+  return exp10_exp2_eval(x);
+#else
   // Range reduction:
   // Let x = log10(2) * (hi + mid1 + mid2) + lo
   // in which:
@@ -511,10 +606,13 @@ LIBC_INLINE double exp10(double x) {
 
   return static_cast<double>(r_f128);
 #endif // LIBC_MATH_HAS_SKIP_ACCURATE_PASS
+#endif // LIBC_MATH_EXP10_USE_EXP2_EVAL
 }
 
 } // namespace math
 
 } // namespace LIBC_NAMESPACE_DECL
+
+#undef LIBC_MATH_EXP10_USE_EXP2_EVAL
 
 #endif // LLVM_LIBC_SRC___SUPPORT_MATH_EXP10_H

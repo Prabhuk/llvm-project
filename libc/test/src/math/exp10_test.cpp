@@ -16,7 +16,15 @@
 #include "utils/MPFRWrapper/MPFRUtils.h"
 
 #ifdef LIBC_MATH_HAS_SKIP_ACCURATE_PASS
+#if (defined(LIBC_MATH_HAS_SMALL_TABLES) ||                                    \
+     defined(LIBC_MATH_HAS_INTERMEDIATE_COMP_IN_FLOAT)) &&                     \
+    !defined(LIBC_MATH_HAS_ASSUME_ROUND_NEAREST_ONLY)
+// exp10 is evaluated with double_eval::exp2_eval, whose measured errors are up
+// to ~1.10 ULPs in round-to-nearest and ~1.65 ULPs in directed rounding modes.
+#define TOLERANCE 2
+#else
 #define TOLERANCE 1
+#endif
 #else
 #define TOLERANCE 0
 #endif // LIBC_MATH_HAS_SKIP_ACCURATE_PASS

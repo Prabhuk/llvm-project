@@ -4440,6 +4440,7 @@ add_header_library(
     exp10.h
   DEPENDS
     .exp_constants
+    .exp_double_utils
     .exp_utils
     libc.src.__support.CPP.bit
     libc.src.__support.CPP.optional
