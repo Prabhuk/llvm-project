@@ -1,12 +1,22 @@
+# UEFI applications only have the firmware consoles to talk to, which is what
+# the baremetal implementation of stdio caters for. UEFI therefore shares that
+# implementation, with the cookie based I/O hooks it is built on being provided
+# by the UEFI OSUtil layer.
+if(LIBC_TARGET_OS_IS_UEFI)
+  set(stdio_target_os baremetal)
+else()
+  set(stdio_target_os ${LIBC_TARGET_OS})
+endif()
+
 # Helper function that creates an alias if a target specific implementation
 # exists, otherwise it uses a generic one.
 function(add_stdio_entrypoint_object name)
-  if(TARGET libc.src.stdio.${LIBC_TARGET_OS}.${name})
+  if(TARGET libc.src.stdio.${stdio_target_os}.${name})
     add_entrypoint_object(
       ${name}
       ALIAS
       DEPENDS
-        .${LIBC_TARGET_OS}.${name}
+        .${stdio_target_os}.${name}
     )
   elseif(TARGET libc.src.stdio.generic.${name})
     add_entrypoint_object(
@@ -18,8 +28,8 @@ function(add_stdio_entrypoint_object name)
   endif()
 endfunction()
 
-if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/${LIBC_TARGET_OS})
-  add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/${LIBC_TARGET_OS})
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/${stdio_target_os})
+  add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/${stdio_target_os})
 endif()
 
 add_stdio_entrypoint_object(stdin)
@@ -33,12 +43,12 @@ if(NOT LLVM_LIBC_FULL_BUILD)
   libc_add_definition(use_system_file "LIBC_COPT_STDIO_USE_SYSTEM_FILE")
 endif()
 
-if(TARGET libc.src.stdio.${LIBC_TARGET_OS}.fflush_internal)
+if(TARGET libc.src.stdio.${stdio_target_os}.fflush_internal)
   add_object_library(
     fflush_internal
     ALIAS
     DEPENDS
-      .${LIBC_TARGET_OS}.fflush_internal
+      .${stdio_target_os}.fflush_internal
   )
 elseif(TARGET libc.src.stdio.generic.fflush_internal)
   add_object_library(
@@ -296,42 +306,42 @@ add_entrypoint_object(
   remove
   ALIAS
   DEPENDS
-    .${LIBC_TARGET_OS}.remove
+    .${stdio_target_os}.remove
 )
 
 add_entrypoint_object(
   rename
   ALIAS
   DEPENDS
-    .${LIBC_TARGET_OS}.rename
+    .${stdio_target_os}.rename
 )
 
 add_entrypoint_object(
   renameat
   ALIAS
   DEPENDS
-    .${LIBC_TARGET_OS}.renameat
+    .${stdio_target_os}.renameat
 )
 
 add_entrypoint_object(
   fdopen
   ALIAS
   DEPENDS
-    .${LIBC_TARGET_OS}.fdopen
+    .${stdio_target_os}.fdopen
 )
 
 add_entrypoint_object(
   tmpfile
   ALIAS
   DEPENDS
-    .${LIBC_TARGET_OS}.tmpfile
+    .${stdio_target_os}.tmpfile
 )
 
 add_entrypoint_object(
   tmpnam
   ALIAS
   DEPENDS
-    .${LIBC_TARGET_OS}.tmpnam
+    .${stdio_target_os}.tmpnam
 )
 
 # These entrypoints have multiple potential implementations.

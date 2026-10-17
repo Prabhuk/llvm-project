@@ -9,7 +9,7 @@
 #include "src/stdio/stdout.h"
 
 #include "hdr/types/FILE.h"
-#include "src/__support/OSUtil/baremetal/io.h"
+#include "src/__support/OSUtil/io.h"
 #include "src/__support/common.h"
 #include "src/__support/macros/config.h"
 

@@ -7,9 +7,18 @@ add_object_library(
     io.h
   DEPENDS
     libc.config.app_h
+    libc.hdr.errno_macros
+    libc.hdr.stdio_macros
+    libc.hdr.types.off_t
+    libc.hdr.types.size_t
+    libc.hdr.types.ssize_t
+    libc.include.llvm-libc-types.EFI_SIMPLE_TEXT_INPUT_PROTOCOL
+    libc.include.llvm-libc-types.EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL
+    libc.include.llvm-libc-types.EFI_STATUS
     libc.include.llvm-libc-types.EFI_SYSTEM_TABLE
     libc.src.__support.common
     libc.src.__support.CPP.string_view
+    libc.src.string.memory_utils.inline_memcpy
 )
 
 add_object_library(
