@@ -2,7 +2,7 @@
 # more specific implementation.
 # TODO: This should probably be cleaned up and formalized.
 function(add_generic_entrypoint_object name)
-  if(NOT TARGET libc.src.stdio.${LIBC_TARGET_OS}.${name})
+  if(NOT TARGET libc.src.stdio.${stdio_target_os}.${name})
     add_entrypoint_object(
       ${name}
       ${ARGN}
@@ -95,7 +95,7 @@ add_generic_entrypoint_object(
 )
 
 # since this isn't an entrypoint we need to do these checks manually.
-if(NOT TARGET libc.src.stdio.${LIBC_TARGET_OS}.fflush_internal AND
+if(NOT TARGET libc.src.stdio.${stdio_target_os}.fflush_internal AND
   TARGET libc.src.__support.File.file AND
   TARGET libc.src.__support.File.platform_file AND
   "libc.src.stdio.stdin" IN_LIST TARGET_LLVMLIBC_ENTRYPOINTS AND
