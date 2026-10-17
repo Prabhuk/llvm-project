@@ -10,6 +10,8 @@
 #include "hdr/stdint_proxy.h"
 #include "src/__support/FPUtil/FPBits.h"
 #include "src/__support/macros/optimization.h"
+#include "src/__support/math/log10f_double_eval.h"
+#include "src/__support/math/log10f_float_eval.h"
 #include "src/math/log10f.h"
 #include "test/UnitTest/FPMatcher.h"
 #include "test/UnitTest/Test.h"
@@ -21,9 +23,24 @@
 #define TOLERANCE 0
 #endif // LIBC_MATH_HAS_SKIP_ACCURATE_PASS
 
-using LlvmLibcLog10fTest = LIBC_NAMESPACE::testing::FPTest<float>;
 
 namespace mpfr = LIBC_NAMESPACE::testing::mpfr;
+
+class LlvmLibcLog10fTest : public LIBC_NAMESPACE::testing::FPTest<float> {
+public:
+  void test_eval_in_float_range(float (*func)(float), double tolerance) {
+    constexpr uint32_t COUNT = 1'231;
+    constexpr uint32_t STEP = UINT32_MAX / COUNT;
+    for (uint32_t i = 0, v = 0; i <= COUNT; ++i, v += STEP) {
+      float x = FPBits(v).get_val();
+      if (FPBits(v).is_nan() || FPBits(v).is_inf() || FPBits(v).is_neg() ||
+          FPBits(v).is_zero())
+        continue;
+      ASSERT_MPFR_MATCH_ALL_ROUNDING(mpfr::Operation::Log10, x, func(x),
+                                     tolerance);
+    }
+  }
+};
 
 TEST_F(LlvmLibcLog10fTest, SpecialNumbers) {
   EXPECT_FP_EQ(aNaN, LIBC_NAMESPACE::log10f(aNaN));
@@ -76,6 +93,16 @@ TEST_F(LlvmLibcLog10fTest, InFloatRange) {
   for (uint32_t i = 0, v = 0; i <= COUNT; ++i, v += STEP) {
     float x = FPBits(v).get_val();
     ASSERT_MPFR_MATCH_ALL_ROUNDING(mpfr::Operation::Log10, x,
-                                   LIBC_NAMESPACE::log10f(x), 0.5);
+                                   LIBC_NAMESPACE::log10f(x), TOLERANCE + 0.5);
   }
+}
+
+// Exercise both implementations independently of the configured selector.
+TEST_F(LlvmLibcLog10fTest, DoubleEvalInFloatRange) {
+  test_eval_in_float_range(&LIBC_NAMESPACE::math::double_eval::log10f,
+                           TOLERANCE + 0.5);
+}
+
+TEST_F(LlvmLibcLog10fTest, FloatEvalInFloatRange) {
+  test_eval_in_float_range(&LIBC_NAMESPACE::math::float_eval::log10f, 1.5);
 }

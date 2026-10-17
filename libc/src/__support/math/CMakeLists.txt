@@ -5304,9 +5304,9 @@ add_header_library(
 )
 
 add_header_library(
-  log10f
+  log10f_double_eval
   HDRS
-    log10f.h
+    log10f_double_eval.h
   DEPENDS
     .common_constants
     libc.src.__support.FPUtil.except_value_utils
@@ -5314,6 +5314,32 @@ add_header_library(
     libc.src.__support.FPUtil.fma
     libc.src.__support.FPUtil.fp_bits
     libc.src.__support.FPUtil.polyeval
+)
+
+add_header_library(
+  log10f_float_eval
+  HDRS
+    log10f_float_eval.h
+  DEPENDS
+    .log2f_float_utils
+    libc.src.__support.FPUtil.double_double
+    libc.src.__support.FPUtil.fenv_impl
+    libc.src.__support.FPUtil.fp_bits
+    libc.src.__support.FPUtil.multiply_add
+    libc.src.__support.common
+    libc.src.__support.macros.config
+    libc.src.__support.macros.optimization
+)
+
+add_header_library(
+  log10f
+  HDRS
+    log10f.h
+  DEPENDS
+    .log10f_double_eval
+    .log10f_float_eval
+    libc.src.__support.macros.config
+    libc.src.__support.macros.optimization
 )
 
 add_header_library(

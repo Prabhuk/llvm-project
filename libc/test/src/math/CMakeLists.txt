@@ -2464,6 +2464,8 @@ add_fp_unittest(
     log10f_test.cpp
   DEPENDS
     libc.src.math.log10f
+    libc.src.__support.math.log10f_double_eval
+    libc.src.__support.math.log10f_float_eval
     libc.src.__support.FPUtil.fp_bits
 )
 
