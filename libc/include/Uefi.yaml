@@ -5,6 +5,7 @@ macros: []
 types:
   - type_name: EFI_BOOT_SERVICES
   - type_name: EFI_GUID
+  - type_name: EFI_LOADED_IMAGE_PROTOCOL
   - type_name: EFI_STATUS
   - type_name: EFI_SYSTEM_TABLE
 enums: []
