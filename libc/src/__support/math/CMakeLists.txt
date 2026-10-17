@@ -5588,6 +5588,7 @@ add_header_library(
   DEPENDS
     .common_constants
     .exp_constants
+    .exp_double_utils
     .exp2
     .log2_double_utils
     libc.hdr.errno_macros

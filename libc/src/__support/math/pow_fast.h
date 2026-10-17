@@ -24,6 +24,7 @@
 #include "src/__support/macros/properties/cpu_features.h"
 #include "src/__support/math/common_constants.h"
 #include "src/__support/math/exp_constants.h"
+#include "src/__support/math/exp_double_utils.h"
 #include "src/__support/math/log2_double_utils.h"
 #include "src/__support/math/pow_utils.h"
 
@@ -181,7 +182,18 @@ LIBC_INLINE double pow(double x, double y) {
   //   y6  = 2^6 * y
   //   hm  = 2^6 * (hi + mid) = round(2^6 * y * log2(x)) ~ round(y6 * s)
   //   lo6 = 2^6 * lo = 2^6 * (y - (hi + mid)) = y6 * log2(x) - hm.
-  constexpr double SCALE = 0x1.0p6;
+  //
+  // With LIBC_MATH_HAS_SMALL_TABLES, mid * 2^3 is an integer instead, 2^mid is
+  // obtained from the 8-entry table double_eval::EXP2_MID (+ EXP2_MID_LO), and
+  // 2^6 is replaced by 2^3 in all of the above and below (so y6 = 2^3 * y,
+  // lo6 = 2^3 * lo with |lo| <= 2^-4 + 2^-38, etc.).
+#ifdef LIBC_MATH_HAS_SMALL_TABLES
+  constexpr int MID_BITS = 3;
+#else
+  constexpr int MID_BITS = 6;
+#endif // LIBC_MATH_HAS_SMALL_TABLES
+  constexpr unsigned MID_MASK = (1U << MID_BITS) - 1;
+  constexpr double SCALE = static_cast<double>(1 << MID_BITS);
   double y6 = y * SCALE; // Exact.
 
   DoubleDouble y6_log2_x = fputil::exact_mult(y6, log2_x.hi);
@@ -264,14 +276,41 @@ LIBC_INLINE double pow(double x, double y) {
   DoubleDouble lo6 = fputil::exact_add(y6_log2_x.hi - hm, y6_log2_x.lo);
 
   int hm_i = static_cast<int>(hm);
-  unsigned idx_y = static_cast<unsigned>(hm_i) & 0x3f;
+  unsigned idx_y = static_cast<unsigned>(hm_i) & MID_MASK;
 
   // 2^hi
-  int64_t exp2_hi_i =
-      static_cast<int64_t>(static_cast<uint64_t>((hm_i >> 6) + FPBits::EXP_BIAS)
-                           << FPBits::FRACTION_LEN);
+  int64_t exp2_hi_i = static_cast<int64_t>(
+      static_cast<uint64_t>((hm_i >> MID_BITS) + FPBits::EXP_BIAS)
+      << FPBits::FRACTION_LEN);
   double exp2_hi = FPBits(static_cast<uint64_t>(exp2_hi_i)).get_val();
 
+#ifdef LIBC_MATH_HAS_SMALL_TABLES
+  // 2^mid, with relative error < 2^-106.
+  DoubleDouble exp2_mid{double_eval::EXP2_MID_LO[idx_y] * sign_d,
+                        double_eval::EXP2_MID[idx_y] * sign_d};
+
+  // 2^(lo6/8) = e^u with u = lo6 * log(2)/8 computed in double-double:
+  //   |u| <= 2^-4 * log(2) * (1 + 2^-34).
+  // Then e^u ~ 1 + u + u^2 * P(u), where P is double_eval::exp_poly (shared
+  // with exp2), whose approximation error is < 1.5 * 2^-57 on
+  // [-2^-4 * log(2), 2^-4 * log(2)].  The rounding errors of u^2 * P(u)
+  // (|u^2 * P(u)| < 2^-10) and the contribution of u.lo to the quadratic term
+  // (< 2^-4 * 2^-57) are < 2^-60.
+  //
+  // hi and lo parts of log(2)/8, generated with MPFR:
+  //   a = round(log(2)/8, D, RN);
+  //   b = round(log(2)/8 - a, D, RN);
+  constexpr DoubleDouble LOG_2_OVER_8 = {0x1.abc9e3b39803fp-59,
+                                         0x1.62e42fefa39efp-4};
+
+  DoubleDouble u = fputil::quick_mult(lo6, LOG_2_OVER_8);
+  DoubleDouble lo_log_2_p1 = fputil::exact_add(1.0, u.hi);
+  lo_log_2_p1.lo += u.lo;
+
+  double u_sq = u.hi * u.hi;
+  double pp = double_eval::exp_poly(u.hi, u_sq);
+  lo_log_2_p1.lo = fputil::multiply_add(u_sq, pp, lo_log_2_p1.lo);
+#else
   // 2^mid
   DoubleDouble exp2_mid{EXP2_MID1[idx_y].mid * sign_d,
                         EXP2_MID1[idx_y].hi * sign_d};
@@ -307,6 +346,8 @@ LIBC_INLINE double pow(double x, double y) {
   double pp = fputil::multiply_add(lo6_sq, e1, e0);
 
   lo_log_2_p1.lo = fputil::multiply_add(lo6_sq, pp, lo_log_2_p1.lo);
+#endif // LIBC_MATH_HAS_SMALL_TABLES
+
   DoubleDouble r = fputil::quick_mult(exp2_mid, lo_log_2_p1);
 
   double tmp1 = (r.hi + r.lo) * exp2_hi;
