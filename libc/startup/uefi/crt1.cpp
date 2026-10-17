@@ -16,10 +16,6 @@
 #include "src/__support/OSUtil/uefi/error.h"
 #include "src/__support/macros/config.h"
 
-namespace LIBC_NAMESPACE_DECL {
-AppProperties app;
-}
-
 extern "C" {
 int main(int argc, char **argv, char **envp);
 
