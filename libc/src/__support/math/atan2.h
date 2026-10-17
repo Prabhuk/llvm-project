@@ -81,22 +81,13 @@ LIBC_INLINE double atan2(double y, double x) {
 
   constexpr double IS_NEG[2] = {1.0, -1.0};
   constexpr DoubleDouble ZERO = {0.0, 0.0};
-  constexpr DoubleDouble MZERO = {-0.0, -0.0};
   constexpr DoubleDouble PI = {0x1.1a62633145c07p-53, 0x1.921fb54442d18p+1};
-  constexpr DoubleDouble MPI = {-0x1.1a62633145c07p-53, -0x1.921fb54442d18p+1};
   constexpr DoubleDouble PI_OVER_2 = {0x1.1a62633145c07p-54,
                                       0x1.921fb54442d18p0};
-  constexpr DoubleDouble MPI_OVER_2 = {-0x1.1a62633145c07p-54,
-                                       -0x1.921fb54442d18p0};
   constexpr DoubleDouble PI_OVER_4 = {0x1.1a62633145c07p-55,
                                       0x1.921fb54442d18p-1};
   constexpr DoubleDouble THREE_PI_OVER_4 = {0x1.a79394c9e8a0ap-54,
                                             0x1.2d97c7f3321d2p+1};
-  // Adjustment for constant term:
-  //   CONST_ADJ[x_sign][y_sign][recip]
-  constexpr DoubleDouble CONST_ADJ[2][2][2] = {
-      {{ZERO, MPI_OVER_2}, {MZERO, MPI_OVER_2}},
-      {{MPI, PI_OVER_2}, {MPI, PI_OVER_2}}};
 
   FPBits x_bits(x), y_bits(y);
   bool x_sign = x_bits.sign().is_neg();
@@ -125,22 +116,24 @@ LIBC_INLINE double atan2(double y, double x) {
     unsigned x_except = x == 0.0 ? 0 : (FPBits(x_abs).is_inf() ? 2 : 1);
     unsigned y_except = y == 0.0 ? 0 : (FPBits(y_abs).is_inf() ? 2 : 1);
 
-    // Exceptional cases:
-    //   EXCEPT[y_except][x_except][x_is_neg]
-    // with x_except & y_except:
+    // Exceptional cases, with x_except & y_except:
     //   0: zero
     //   1: finite, non-zero
     //   2: infinity
-    constexpr DoubleDouble EXCEPTS[3][3][2] = {
-        {{ZERO, PI}, {ZERO, PI}, {ZERO, PI}},
-        {{PI_OVER_2, PI_OVER_2}, {ZERO, ZERO}, {ZERO, PI}},
-        {{PI_OVER_2, PI_OVER_2},
-         {PI_OVER_2, PI_OVER_2},
-         {PI_OVER_4, THREE_PI_OVER_4}},
-    };
-
+    // The result before applying sign(y) is:
+    //   y_except \ x_except |  0       1       2
+    //   --------------------+--------------------------
+    //          0            |  0|pi    0|pi    0|pi
+    //          1            |  pi/2    n/a     0|pi
+    //          2            |  pi/2    pi/2    pi/4|3pi/4
+    // where a|b means a if x is positive and b if x is negative.
+    // These are selected directly instead of being looked up from a table.
     if ((x_except != 1) || (y_except != 1)) {
-      DoubleDouble r = EXCEPTS[y_except][x_except][x_sign];
+      DoubleDouble r =
+          (y_except > x_except)
+              ? PI_OVER_2
+              : ((y_except == 2) ? (x_sign ? THREE_PI_OVER_4 : PI_OVER_4)
+                                 : (x_sign ? PI : ZERO));
       return fputil::multiply_add(IS_NEG[y_sign], r.hi, IS_NEG[y_sign] * r.lo);
     }
     bool scale_up = min_exp < 128U;
@@ -164,7 +157,17 @@ LIBC_INLINE double atan2(double y, double x) {
   }
 
   double final_sign = IS_NEG[(x_sign != y_sign) != recip];
-  DoubleDouble const_term = CONST_ADJ[x_sign][y_sign][recip];
+  // Adjustment for constant term, computed as a multiple of pi/2 instead of
+  // being looked up from a table:
+  //   x_sign | recip = false | recip = true
+  //   -------+---------------+-------------
+  //     +    |  sign(y) * 0  |    -pi/2
+  //     -    |      -pi      |     pi/2
+  // The multiplications by +-0, +-1 and -2 are exact.
+  double const_mult =
+      recip ? (x_sign ? 1.0 : -1.0) : (x_sign ? -2.0 : (y_sign ? -0.0 : 0.0));
+  DoubleDouble const_term = {const_mult * PI_OVER_2.lo,
+                             const_mult * PI_OVER_2.hi};
   unsigned exp_diff = max_exp - min_exp;
   // We have the following bound for normalized n and d:
   //   2^(-exp_diff - 1) < n/d < 2^(-exp_diff + 1).
