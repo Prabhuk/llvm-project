@@ -12,6 +12,7 @@
 #include "hdr/stdint_proxy.h"
 #include "include/llvm-libc-types/EFI_HANDLE.h"
 #include "include/llvm-libc-types/EFI_SYSTEM_TABLE.h"
+#include "src/__support/macros/attributes.h"
 #include "src/__support/macros/config.h"
 #include "src/__support/macros/properties/architectures.h"
 
@@ -26,7 +27,7 @@ struct AppProperties {
   EFI_HANDLE image_handle;
 };
 
-[[gnu::weak]] extern AppProperties app;
+LIBC_INLINE_VAR AppProperties app;
 
 } // namespace LIBC_NAMESPACE_DECL
 
