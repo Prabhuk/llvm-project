@@ -5564,11 +5564,25 @@ add_header_library(
 )
 
 add_header_library(
+  log2f_float_utils
+  HDRS
+    log2f_float_utils.h
+  DEPENDS
+    libc.src.__support.FPUtil.double_double
+    libc.src.__support.FPUtil.fp_bits
+    libc.src.__support.FPUtil.multiply_add
+    libc.src.__support.macros.attributes
+    libc.src.__support.macros.config
+    libc.src.__support.macros.properties.cpu_features
+)
+
+add_header_library(
   powf_float_eval
   HDRS
     powf_float_eval.h
   DEPENDS
     .exp2f_float_utils
+    .log2f_float_utils
     .powf_utils
     libc.src.__support.CPP.bit
     libc.src.__support.FPUtil.double_double
