@@ -92,6 +92,12 @@ typedef EFI_STATUS(EFIAPI *EFI_LOCATE_DEVICE_PATH)(
 
 typedef EFI_STATUS(EFIAPI *EFI_INSTALL_CONFIGURATION_TABLE)(EFI_GUID *Guid,
                                                             void *Table);
+typedef EFI_STATUS(EFIAPI *EFI_IMAGE_LOAD)(bool BootPolicy,
+                                           EFI_HANDLE ParentImageHandle,
+                                           EFI_DEVICE_PATH_PROTOCOL *DevicePath,
+                                           void *SourceBuffer,
+                                           size_t SourceSize,
+                                           EFI_HANDLE *ImageHandle);
 typedef EFI_STATUS(EFIAPI *EFI_IMAGE_UNLOAD)(EFI_HANDLE ImageHandle);
 typedef EFI_STATUS(EFIAPI *EFI_IMAGE_START)(EFI_HANDLE ImageHandle,
                                             size_t *ExitDataSize,
@@ -198,7 +204,7 @@ typedef struct {
   //
   // Image Services
   //
-  EFI_IMAGE_UNLOAD LoadImage;              // EFI 1.0+
+  EFI_IMAGE_LOAD LoadImage;                // EFI 1.0+
   EFI_IMAGE_START StartImage;              // EFI 1.0+
   EFI_EXIT Exit;                           // EFI 1.0+
   EFI_IMAGE_UNLOAD UnloadImage;            // EFI 1.0+
