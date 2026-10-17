@@ -74,6 +74,11 @@ namespace math {
 //   |atan(u) - P(u)| < |u|^11 / 11 < 2^-80
 // and relative errors bounded by:
 //   |(atan(u) - P(u)) / P(u)| < u^10 / 11 < 2^-73.
+// When LIBC_MATH_ATAN_SMALL_TABLES is defined (SKIP_ACCURATE_PASS and
+// SMALL_TABLES), we use idx := round(2^4 * n/d) and the 17-entry table
+// ATAN_I_16 instead, so that |n/d - idx/16| <= 1/32, and a degree-13 Taylor
+// polynomial for the RHS, with the same relative error bound of 2^-73 (see
+// atan_eval in atan_utils.h).
 
 LIBC_INLINE double atan2(double y, double x) {
   using namespace atan_internal;
@@ -176,10 +181,17 @@ LIBC_INLINE double atan2(double y, double x) {
                                 final_sign * (const_term.lo + num / den));
   }
 
+#ifdef LIBC_MATH_ATAN_SMALL_TABLES
+  double k = fputil::nearest_integer(16.0 * num / den);
+  unsigned idx = static_cast<unsigned>(k);
+  // k = idx / 16
+  k *= 0x1.0p-4;
+#else
   double k = fputil::nearest_integer(64.0 * num / den);
   unsigned idx = static_cast<unsigned>(k);
   // k = idx / 64
   k *= 0x1.0p-6;
+#endif // LIBC_MATH_ATAN_SMALL_TABLES
 
   // Range reduction:
   // atan(n/d) - atan(k/64) = atan((n/d - k/64) / (1 + (n/d) * (k/64)))
@@ -198,7 +210,11 @@ LIBC_INLINE double atan2(double y, double x) {
   // p ~ atan(q)
   DoubleDouble p = atan_eval(q);
 
+#ifdef LIBC_MATH_ATAN_SMALL_TABLES
+  DoubleDouble r = fputil::add(const_term, fputil::add(ATAN_I_16[idx], p));
+#else
   DoubleDouble r = fputil::add(const_term, fputil::add(ATAN_I[idx], p));
+#endif // LIBC_MATH_ATAN_SMALL_TABLES
   r.hi *= final_sign;
   r.lo *= final_sign;
 

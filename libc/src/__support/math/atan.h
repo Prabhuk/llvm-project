@@ -33,6 +33,10 @@ namespace math {
 //                = sign(x) * (atan(k) + atan((|x| - k) / (1 + |x|*k)).
 //      We store atan(k) in a look up table, and perform intermediate steps in
 //      double-double.
+//      When LIBC_MATH_ATAN_SMALL_TABLES is defined (SKIP_ACCURATE_PASS and
+//      SMALL_TABLES), we reduce mod 2^-4 = 1/16 instead, using the 17-entry
+//      table ATAN_I_16 and a higher degree polynomial for atan((|x| - k) /
+//      (1 + |x|*k)), see atan_eval in atan_utils.h.
 // * 1 < |x| < 2^53:
 //      First we perform the transformation y = 1/|x|:
 //        atan(x) = sign(x) * (pi/2 - atan(1/|x|))
@@ -84,10 +88,17 @@ LIBC_INLINE double atan(double x) {
     }
 
     double x_d = xbits.get_val();
+#ifdef LIBC_MATH_ATAN_SMALL_TABLES
+    // k = 2^-4 * round(2^4 * |x|)
+    double k = fputil::nearest_integer(0x1.0p4 * x_d);
+    unsigned idx = static_cast<unsigned>(k);
+    k *= 0x1.0p-4;
+#else
     // k = 2^-6 * round(2^6 * |x|)
     double k = fputil::nearest_integer(0x1.0p6 * x_d);
     unsigned idx = static_cast<unsigned>(k);
     k *= 0x1.0p-6;
+#endif // LIBC_MATH_ATAN_SMALL_TABLES
 
     // numerator = |x| - k
     DoubleDouble num, den;
@@ -108,7 +119,10 @@ LIBC_INLINE double atan(double x) {
 
     // atan(x) = sign(x) * (atan(k) + atan(x_r))
     //         = sign(x) * (atan(k) + atan( (|x| - k) / (1 + k * |x|) ))
-#ifdef LIBC_MATH_HAS_SKIP_ACCURATE_PASS
+#ifdef LIBC_MATH_ATAN_SMALL_TABLES
+    return IS_NEG[x_sign] *
+           (ATAN_I_16[idx].hi + (p.hi + (p.lo + ATAN_I_16[idx].lo)));
+#elif defined(LIBC_MATH_HAS_SKIP_ACCURATE_PASS)
     return IS_NEG[x_sign] * (ATAN_I[idx].hi + (p.hi + (p.lo + ATAN_I[idx].lo)));
 #else
 
@@ -117,7 +131,7 @@ LIBC_INLINE double atan(double x) {
     double r = IS_NEG[x_sign] * (c0.hi + c1);
 
     return r;
-#endif // LIBC_MATH_HAS_SKIP_ACCURATE_PASS
+#endif // LIBC_MATH_ATAN_SMALL_TABLES
   }
 
   // |x| >= 2^53 or x is NaN.
@@ -144,10 +158,17 @@ LIBC_INLINE double atan(double x) {
   double x_d = xbits.get_val();
   double y = 1.0 / x_d;
 
+#ifdef LIBC_MATH_ATAN_SMALL_TABLES
+  // k = 2^-4 * round(2^4 / |x|)
+  double k = fputil::nearest_integer(0x1.0p4 * y);
+  unsigned idx = static_cast<unsigned>(k);
+  k *= 0x1.0p-4;
+#else
   // k = 2^-6 * round(2^6 / |x|)
   double k = fputil::nearest_integer(0x1.0p6 * y);
   unsigned idx = static_cast<unsigned>(k);
   k *= 0x1.0p-6;
+#endif // LIBC_MATH_ATAN_SMALL_TABLES
 
   // denominator = |x| + k
   DoubleDouble den = fputil::exact_add(x_d, k);
@@ -168,7 +189,11 @@ LIBC_INLINE double atan(double x) {
   // atan(x) = sign(x) * (pi/2 - atan(1/|x|))
   //         = sign(x) * (pi/2 - atan(k) - atan(x_r))
   //         = (-sign(x)) * (-pi/2 + atan(k) + atan((1 - k*|x|)/(|x| - k)))
-#ifdef LIBC_MATH_HAS_SKIP_ACCURATE_PASS
+#ifdef LIBC_MATH_ATAN_SMALL_TABLES
+  double lo_part = p.lo + ATAN_I_16[idx].lo + MPI_OVER_2.lo;
+  return IS_NEG[!x_sign] *
+         (MPI_OVER_2.hi + ATAN_I_16[idx].hi + (p.hi + lo_part));
+#elif defined(LIBC_MATH_HAS_SKIP_ACCURATE_PASS)
   double lo_part = p.lo + ATAN_I[idx].lo + MPI_OVER_2.lo;
   return IS_NEG[!x_sign] * (MPI_OVER_2.hi + ATAN_I[idx].hi + (p.hi + lo_part));
 #else
