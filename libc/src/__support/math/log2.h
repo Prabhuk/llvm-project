@@ -10,6 +10,7 @@
 #define LLVM_LIBC_SRC___SUPPORT_MATH_LOG2_H
 
 #include "common_constants.h"
+#include "log2_double_utils.h"
 #include "log_range_reduction.h"
 #include "src/__support/FPUtil/FEnvImpl.h"
 #include "src/__support/FPUtil/FPBits.h"
@@ -899,6 +900,17 @@ LIBC_INLINE double log2(double x) {
     x_u = xbits.uintval();
   }
 
+#if defined(LIBC_MATH_HAS_SKIP_ACCURATE_PASS) &&                               \
+    defined(LIBC_MATH_HAS_SMALL_TABLES)
+  // Use the 16-entry range reduction from log2_double_utils.h instead of the
+  // 128-entry tables RD and LOG_R1 below.  See log2_eval_dd for the range
+  // reduction and the error analysis; the relative error of the double-double
+  // result is bounded by ~2^-66.
+  x_e += static_cast<int>(x_u >> FPBits_t::FRACTION_LEN);
+  fputil::DoubleDouble r = double_eval::log2_eval_dd(
+      static_cast<double>(x_e), x_u & FPBits_t::FRACTION_MASK);
+  return r.hi + r.lo;
+#else
   // log2(x) = log2(2^x_e * x_m)
   //         = x_e + log2(x_m)
   // Range reduction for log2(x_m):
@@ -969,6 +981,7 @@ LIBC_INLINE double log2(double x) {
 
   return log2_accurate(x_e, index, u);
 #endif // LIBC_MATH_HAS_SKIP_ACCURATE_PASS
+#endif // LIBC_MATH_HAS_SKIP_ACCURATE_PASS && LIBC_MATH_HAS_SMALL_TABLES
 }
 
 } // namespace math

@@ -5375,11 +5375,24 @@ add_header_library(
 )
 
 add_header_library(
+  log2_double_utils
+  HDRS
+    log2_double_utils.h
+  DEPENDS
+    libc.src.__support.FPUtil.double_double
+    libc.src.__support.FPUtil.fp_bits
+    libc.src.__support.FPUtil.multiply_add
+    libc.src.__support.common
+    libc.src.__support.macros.config
+)
+
+add_header_library(
   log2
   HDRS
     log2.h
   DEPENDS
     .common_constants
+    .log2_double_utils
     .log_range_reduction
     libc.src.__support.FPUtil.double_double
     libc.src.__support.FPUtil.dyadic_float
