@@ -2377,6 +2377,8 @@ add_fp_unittest(
     logf_test.cpp
   DEPENDS
     libc.src.math.logf
+    libc.src.__support.math.logf_double_eval
+    libc.src.__support.math.logf_float_eval
     libc.src.__support.FPUtil.fp_bits
 )
 

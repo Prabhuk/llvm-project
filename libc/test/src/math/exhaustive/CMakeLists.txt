@@ -355,6 +355,7 @@ add_fp_unittest(
   DEPENDS
     .exhaustive_test
     libc.src.math.logf
+    libc.src.__support.math.logf_float_eval
     libc.src.__support.FPUtil.fp_bits
   LINK_LIBRARIES
     -lpthread

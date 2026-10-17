@@ -10445,9 +10445,14 @@ libc_support_library(
 
 libc_support_library(
     name = "__support_math_logf",
-    hdrs = ["src/__support/math/logf.h"],
+    hdrs = [
+        "src/__support/math/logf.h",
+        "src/__support/math/logf_double_eval.h",
+        "src/__support/math/logf_float_eval.h",
+    ],
     deps = [
         ":__support_common",
+        ":__support_fputil_double_double",
         ":__support_fputil_except_value_utils",
         ":__support_fputil_fenv_impl",
         ":__support_fputil_fp_bits",
@@ -10457,6 +10462,7 @@ libc_support_library(
         ":__support_macros_optimization",
         ":__support_macros_properties_cpu_features",
         ":__support_math_common_constants",
+        ":__support_math_log2f_float_utils",
     ],
 )
 
