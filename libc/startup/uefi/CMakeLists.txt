@@ -35,7 +35,16 @@ add_startup_object(
     crt1.cpp
   DEPENDS
     libc.config.app_h
-    libc.src.__support.OSUtil.uefi.uefi_util
+    libc.hdr.types.size_t
+    libc.include.llvm-libc-types.EFI_GUID
+    libc.include.llvm-libc-types.EFI_HANDLE
+    libc.include.llvm-libc-types.EFI_LOADED_IMAGE_PROTOCOL
+    libc.include.llvm-libc-types.EFI_STATUS
+    libc.include.llvm-libc-types.EFI_SYSTEM_TABLE
+    libc.src.__support.wchar.character_converter
+    libc.src.__support.wchar.mbstate
+    libc.src.stdlib.exit
+    libc.src.stdlib.malloc
 )
 
 add_custom_target(libc-startup)

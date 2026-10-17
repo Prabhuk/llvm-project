@@ -1323,7 +1323,9 @@ add_header_macro(
   Uefi.h
   DEPENDS
     .llvm_libc_common_h
+    .llvm-libc-types.EFI_BOOT_SERVICES
     .llvm-libc-types.EFI_GUID
+    .llvm-libc-types.EFI_LOADED_IMAGE_PROTOCOL
     .llvm-libc-types.EFI_STATUS
     .llvm-libc-types.EFI_SYSTEM_TABLE
 )

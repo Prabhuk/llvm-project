@@ -755,6 +755,17 @@ add_header(EFI_SYSTEM_TABLE
     .EFI_TABLE_HEADER
     .char16_t
 )
+add_header(EFI_LOADED_IMAGE_PROTOCOL
+  HDR
+    EFI_LOADED_IMAGE_PROTOCOL.h
+  DEPENDS
+    libc.include.llvm-libc-macros.stdint_macros
+    .EFI_BOOT_SERVICES
+    .EFI_DEVICE_PATH_PROTOCOL
+    .EFI_HANDLE
+    .EFI_MEMORY_TYPE
+    .EFI_SYSTEM_TABLE
+)
 add_header(__action_closure_fn_t
   HDR
     __action_closure_fn_t.h
