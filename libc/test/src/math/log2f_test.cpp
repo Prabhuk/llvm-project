@@ -9,6 +9,9 @@
 #include "hdr/math_macros.h"
 #include "src/__support/FPUtil/FPBits.h"
 #include "src/__support/libc_errno.h"
+#include "src/__support/macros/optimization.h"
+#include "src/__support/math/log2f_double_eval.h"
+#include "src/__support/math/log2f_float_eval.h"
 #include "src/math/log2f.h"
 #include "test/UnitTest/FPMatcher.h"
 #include "test/UnitTest/Test.h"
@@ -16,9 +19,29 @@
 
 #include "hdr/stdint_proxy.h"
 
-using LlvmLibcLog2fTest = LIBC_NAMESPACE::testing::FPTest<float>;
+#ifdef LIBC_MATH_HAS_SKIP_ACCURATE_PASS
+#define TOLERANCE 1
+#else
+#define TOLERANCE 0
+#endif // LIBC_MATH_HAS_SKIP_ACCURATE_PASS
 
 namespace mpfr = LIBC_NAMESPACE::testing::mpfr;
+
+class LlvmLibcLog2fTest : public LIBC_NAMESPACE::testing::FPTest<float> {
+public:
+  void test_eval_in_float_range(float (*func)(float), double tolerance) {
+    constexpr uint32_t COUNT = 1'231;
+    constexpr uint32_t STEP = UINT32_MAX / COUNT;
+    for (uint32_t i = 0, v = 0; i <= COUNT; ++i, v += STEP) {
+      float x = FPBits(v).get_val();
+      if (FPBits(v).is_nan() || FPBits(v).is_inf() || FPBits(v).is_neg() ||
+          FPBits(v).is_zero())
+        continue;
+      ASSERT_MPFR_MATCH_ALL_ROUNDING(mpfr::Operation::Log2, x, func(x),
+                                     tolerance);
+    }
+  }
+};
 
 TEST_F(LlvmLibcLog2fTest, SpecialNumbers) {
   EXPECT_FP_EQ(aNaN, LIBC_NAMESPACE::log2f(aNaN));
@@ -41,7 +64,7 @@ TEST_F(LlvmLibcLog2fTest, TrickyInputs) {
   for (int i = 0; i < N; ++i) {
     float x = FPBits(INPUTS[i]).get_val();
     EXPECT_MPFR_MATCH_ALL_ROUNDING(mpfr::Operation::Log2, x,
-                                   LIBC_NAMESPACE::log2f(x), 0.5);
+                                   LIBC_NAMESPACE::log2f(x), TOLERANCE + 0.5);
   }
 }
 
@@ -61,6 +84,15 @@ TEST_F(LlvmLibcLog2fTest, InFloatRange) {
     if (FPBits(result).is_nan() || FPBits(result).is_inf() || libc_errno != 0)
       continue;
     ASSERT_MPFR_MATCH_ALL_ROUNDING(mpfr::Operation::Log2, x,
-                                   LIBC_NAMESPACE::log2f(x), 0.5);
+                                   LIBC_NAMESPACE::log2f(x), TOLERANCE + 0.5);
   }
+}
+
+// Exercise both implementations independently of the configured selector.
+TEST_F(LlvmLibcLog2fTest, DoubleEvalInFloatRange) {
+  test_eval_in_float_range(&LIBC_NAMESPACE::math::double_eval::log2f, 0.5);
+}
+
+TEST_F(LlvmLibcLog2fTest, FloatEvalInFloatRange) {
+  test_eval_in_float_range(&LIBC_NAMESPACE::math::float_eval::log2f, 1.5);
 }

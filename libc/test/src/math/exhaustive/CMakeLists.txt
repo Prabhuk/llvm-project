@@ -403,6 +403,7 @@ add_fp_unittest(
   DEPENDS
     .exhaustive_test
     libc.src.math.log2f
+    libc.src.__support.math.log2f_float_eval
     libc.src.__support.FPUtil.fp_bits
   LINK_LIBRARIES
     -lpthread

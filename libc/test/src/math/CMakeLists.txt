@@ -2425,6 +2425,8 @@ add_fp_unittest(
   DEPENDS
     libc.src.errno.errno
     libc.src.math.log2f
+    libc.src.__support.math.log2f_double_eval
+    libc.src.__support.math.log2f_float_eval
     libc.src.__support.FPUtil.fp_bits
 )
 
