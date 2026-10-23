@@ -1,0 +1,88 @@
+## Test basic stack usage estimation, JSON output, --call-frame-overhead,
+## --output/--depfile, and rejection of ET_REL inputs.
+
+# RUN: yaml2obj --docnum=1 %s -o %t.elf
+# RUN: llvm-stack-size %t.elf | FileCheck %s --check-prefix=TEXT
+# RUN: llvm-stack-size --elf=%t.elf --call-frame-overhead=8 | FileCheck %s --check-prefix=OVERHEAD
+# RUN: llvm-stack-size %t.elf --json -o %t.json --depfile=%t.d
+# RUN: FileCheck %s --check-prefix=JSON < %t.json
+# RUN: FileCheck %s --check-prefix=DEP < %t.d
+
+# RUN: yaml2obj --docnum=2 %s -o %t.rel.o
+# RUN: not llvm-stack-size %t.rel.o 2>&1 | FileCheck %s --check-prefix=REL-ERR
+
+# TEXT:      Entry Point: main (0x1000)
+# TEXT-NEXT:   Stack Usage: 48 bytes
+# TEXT-NEXT:   Max Stack Path:
+# TEXT-NEXT:     main ({{[{][{][{]pc:0x1000[}][}][}]}}): 16 bytes
+# TEXT-NEXT:     helper ({{[{][{][{]pc:0x2000[}][}][}]}}): 32 bytes
+
+# OVERHEAD:      Call Frame Overhead: 8 bytes per call
+# OVERHEAD:      Entry Point: main (0x1000)
+# OVERHEAD-NEXT:   Stack Usage: 64 bytes
+
+# JSON:      "call_frame_overhead": 0,
+# JSON-NEXT: "entry_points": [
+# JSON-NEXT:   {
+# JSON-NEXT:     "address": "0x1000",
+# JSON-NEXT:     "cycles": [],
+# JSON-NEXT:     "entry_point": "main",
+# JSON-NEXT:     "has_call_graph": true,
+# JSON-NEXT:     "is_lower_bound": false,
+# JSON-NEXT:     "lower_bound_reasons": [],
+# JSON-NEXT:     "max_stack_path": [
+# JSON-NEXT:       {
+# JSON-NEXT:         "address": "0x1000",
+# JSON-NEXT:         "name": "main",
+# JSON-NEXT:         "stack_size": 16
+# JSON-NEXT:       },
+# JSON-NEXT:       {
+# JSON-NEXT:         "address": "0x2000",
+# JSON-NEXT:         "name": "helper",
+# JSON-NEXT:         "stack_size": 32
+# JSON-NEXT:       }
+# JSON-NEXT:     ],
+# JSON-NEXT:     "max_stack_usage_bytes": 48,
+# JSON-NEXT:     "stack_usage_expr": "48",
+
+# DEP: .json: {{.*}}.elf
+
+# REL-ERR: error: {{.*}}relocatable object file; link it first
+
+--- !ELF
+FileHeader:
+  Class:   ELFCLASS64
+  Data:    ELFDATA2LSB
+  Type:    ET_EXEC
+  Machine: EM_AARCH64
+  Entry:   0x1000
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    Address: 0x1000
+    Size: 0x2000
+  - Name: .stack_sizes
+    Type: SHT_PROGBITS
+    # 0x1000 -> 16 (0x10), 0x2000 -> 32 (0x20)
+    Content: "001000000000000010002000000000000020"
+  - Name: .llvm.callgraph
+    Type: SHT_LLVM_CALL_GRAPH
+    # 0x1000 calls 0x2000; 0x2000 is a leaf.
+    Content: "000200100000000000000000000000000000010020000000000000000000200000000000000000000000000000"
+Symbols:
+  - Name:    main
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x1000
+  - Name:    helper
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x2000
+
+--- !ELF
+FileHeader:
+  Class:   ELFCLASS64
+  Data:    ELFDATA2LSB
+  Type:    ET_REL
+  Machine: EM_AARCH64

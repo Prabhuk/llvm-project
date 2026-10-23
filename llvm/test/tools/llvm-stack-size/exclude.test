@@ -1,0 +1,41 @@
+## Test --exclude flag removing excluded functions from call edges.
+
+# RUN: yaml2obj %s -o %t.elf
+# RUN: llvm-stack-size %t.elf --exclude=ignored_fn | FileCheck %s
+
+# CHECK:      Entry Point: main (0x1000)
+# CHECK-NEXT:   Stack Usage: 16 bytes
+# CHECK-NEXT:   Max Stack Path:
+# CHECK-NEXT:     main ({{[{][{][{]pc:0x1000[}][}][}]}}): 16 bytes
+# CHECK-NOT:  ignored_fn
+
+--- !ELF
+FileHeader:
+  Class:   ELFCLASS64
+  Data:    ELFDATA2LSB
+  Type:    ET_EXEC
+  Machine: EM_AARCH64
+  Entry:   0x1000
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    Address: 0x1000
+    Size: 0x2000
+  - Name: .stack_sizes
+    Type: SHT_PROGBITS
+    # 0x1000 -> 16, 0x2000 -> 256
+    Content: "00100000000000001000200000000000008002"
+  - Name: .llvm.callgraph
+    Type: SHT_LLVM_CALL_GRAPH
+    # 0x1000 calls 0x2000; 0x2000 is a leaf.
+    Content: "000200100000000000000000000000000000010020000000000000000000200000000000000000000000000000"
+Symbols:
+  - Name:    main
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x1000
+  - Name:    ignored_fn
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x2000

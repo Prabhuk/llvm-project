@@ -302,6 +302,7 @@ tools.extend(
         "llvm-rtdyld",
         "llvm-size",
         "llvm-split",
+        "llvm-stack-size",
         "llvm-stress",
         "llvm-strings",
         "llvm-strip",

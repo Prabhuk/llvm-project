@@ -1,0 +1,58 @@
+## Test lower-bound diagnostics and algebraic stack usage expressions:
+## cycles, missing .stack_sizes, external/uninstrumented callees, and
+## unresolved indirect calls.
+
+# RUN: yaml2obj %s -o %t.elf
+# RUN: llvm-stack-size %t.elf --entry-point=caller | FileCheck %s
+
+# CHECK:      Indirect targets with unknown type ID (0):
+# CHECK-NEXT:   untyped_target ({{[{][{][{]pc:0x4000[}][}][}]}})
+# CHECK:      Entry Point: caller (0x1000)
+# CHECK-NEXT:   Stack Usage: max(80 + calls(<external>) + indirect(caller), 32 + calls(<external>) + indirect(caller) + frame(target_fn)) (known constant: 80 bytes) [LOWER BOUND]
+# CHECK-NEXT:   Max Stack Path:
+# CHECK-NEXT:     caller ({{[{][{][{]pc:0x1000[}][}][}]}}): 32 bytes
+# CHECK-NEXT:     icf_func ({{[{][{][{]pc:0x2000[}][}][}]}}): 48 bytes
+# CHECK-NEXT:   Lower Bound Reasons:
+# CHECK-NEXT:     - Unknown stack size for function: target_fn (0x3000)
+# CHECK-NEXT:     - Calls uninstrumented function: <external> (0x0) (called by caller)
+# CHECK-NEXT:     - Unresolved indirect call in function: caller (0x1000) (type IDs: 0xbbb)
+# CHECK-NEXT:   Unresolved Indirect Call Sites:
+# CHECK-NEXT:     caller ({{[{][{][{]pc:0x1000[}][}][}]}}): 0xbbb
+
+--- !ELF
+FileHeader:
+  Class:   ELFCLASS64
+  Data:    ELFDATA2LSB
+  Type:    ET_DYN
+  Machine: EM_AARCH64
+  Entry:   0x1000
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    Address: 0x1000
+    Size: 0x4000
+  - Name: .stack_sizes
+    Type: SHT_PROGBITS
+    # 0x1000 -> 32, 0x2000 -> 16, 0x2000 -> 48 (ICF max = 48)
+    Content: "001000000000000020002000000000000010002000000000000030"
+  - Name: .llvm.callgraph
+    Type: SHT_LLVM_CALL_GRAPH
+    Content: "000600100000000000000000000000000000020020000000000000000000000000000002aa0a000000000000bb0b00000000000000000020000000000000000000000000000000010030000000000000aa0a000000000000000100400000000000000000000000000000"
+Symbols:
+  - Name:    caller
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x1000
+  - Name:    icf_func
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x2000
+  - Name:    target_fn
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x3000
+  - Name:    untyped_target
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x4000
