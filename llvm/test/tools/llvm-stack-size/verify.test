@@ -1,0 +1,145 @@
+## --max-stack-usage, --limit and --leaf turn the report into a check.
+## A limit is a guarantee, so a lower bound fails it whatever its value.
+
+# RUN: yaml2obj %s -o %t
+
+## The default entry points main (56 bytes) and api (64 bytes) fit.
+# RUN: llvm-stack-size %t --max-stack-usage=64 > /dev/null
+# RUN: not llvm-stack-size %t --max-stack-usage=60 2>&1 >/dev/null | FileCheck %s --check-prefix=EXCEEDS --match-full-lines
+
+#      EXCEEDS:{{.*}}error: api (0x4000) uses 64 bytes of stack, more than the limit of 60 bytes:
+# EXCEEDS-NEXT:  api (0x4000): 64 bytes
+#  EXCEEDS-NOT:error:
+
+## --limit overrides the budget for one function, in either direction, and
+## analyzes a function that is not an entry point otherwise. The tightest
+## limit named for a function wins, also across its aliases.
+# RUN: llvm-stack-size %t --max-stack-usage=60 --limit=api=64 > /dev/null
+# RUN: not llvm-stack-size %t --limit=helper=32 2>&1 >/dev/null | FileCheck %s --check-prefix=HELPER --match-full-lines
+# RUN: not llvm-stack-size %t --limit=api=100 --limit=api_alias=60 2>&1 >/dev/null | FileCheck %s --check-prefix=EXCEEDS --match-full-lines
+# RUN: llvm-stack-size %t --limit=helper=40 | FileCheck %s --check-prefix=ADDED
+
+#      HELPER:{{.*}}error: helper (0x2000) uses 40 bytes of stack, more than the limit of 32 bytes:
+# HELPER-NEXT:  helper (0x2000): 32 bytes
+# HELPER-NEXT:  leaf (0x3000): 8 bytes
+
+# ADDED: Entry point: helper (0x2000)
+
+## A lower bound fails a limit even when the number fits.
+# RUN: not llvm-stack-size %t --limit=ext_caller=1024 2>&1 >/dev/null | FileCheck %s --check-prefix=LOWER --match-full-lines
+
+#      LOWER:{{.*}}error: ext_caller (0x5000) may use more than 1024 bytes of stack, its estimate of 16 bytes is only a lower bound (16 + calls(<external>)) because:
+# LOWER-NEXT:  unknown callees: <external> (0x0), called by ext_caller (0x5000)
+
+## --leaf requires a function that makes no calls at all.
+# RUN: llvm-stack-size %t --leaf=api --leaf=leaf > /dev/null
+# RUN: not llvm-stack-size %t --leaf=main --leaf=asm_fn 2>&1 >/dev/null | FileCheck %s --check-prefix=LEAF --match-full-lines
+
+#      LEAF:{{.*}}error: main (0x1000) must be a leaf function but calls helper (0x2000)
+# LEAF-NEXT:{{.*}}error: asm_fn (0x6000) must be a leaf function but has no call graph information
+
+## The report is still written when the check fails, and a bad spelling is
+## an error.
+# RUN: not llvm-stack-size %t --max-stack-usage=1 -o %t.out 2>/dev/null; FileCheck %s --check-prefix=ADDED-MAIN < %t.out
+# RUN: not llvm-stack-size %t --limit=main 2>&1 | FileCheck %s --check-prefix=BAD-LIMIT
+# RUN: not llvm-stack-size %t --limit=nobody=1 2>&1 | FileCheck %s --check-prefix=NOBODY
+
+# ADDED-MAIN: Entry point: main (0x1000)
+# BAD-LIMIT: error: invalid --limit: 'main', expected <function>=<bytes>
+# NOBODY: error: no function named 'nobody'
+
+--- !ELF
+FileHeader:
+  Class:   ELFCLASS64
+  Data:    ELFDATA2LSB
+  Type:    ET_DYN
+  Machine: EM_AARCH64
+Sections:
+  - Name:    .text
+    Type:    SHT_PROGBITS
+    Flags:   [ SHF_ALLOC, SHF_EXECINSTR ]
+    Address: 0x1000
+    Size:    0x10000
+  - Name: .stack_sizes
+    Type: SHT_PROGBITS
+    Entries:
+      - Address: 0x1000
+        Size:    16
+      - Address: 0x2000
+        Size:    32
+      - Address: 0x3000
+        Size:    8
+      - Address: 0x4000
+        Size:    64
+      - Address: 0x5000
+        Size:    16
+      - Address: 0x6000
+        Size:    24
+  - Name: .llvm.callgraph
+    Type: SHT_LLVM_CALL_GRAPH
+    ContentArray: [
+      0x00,                                           ## Version
+      0x02,                                           ## Flags
+      0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Function 0x1000
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Type ID 0x0
+      0x01,                                           ## 1 direct callees
+      0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Callee 0x2000
+      0x00,                                           ## Version
+      0x02,                                           ## Flags
+      0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Function 0x2000
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Type ID 0x0
+      0x01,                                           ## 1 direct callees
+      0x00, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Callee 0x3000
+      0x00,                                           ## Version
+      0x00,                                           ## Flags
+      0x00, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Function 0x3000
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Type ID 0x0
+      0x00,                                           ## Version
+      0x00,                                           ## Flags
+      0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Function 0x4000
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Type ID 0x0
+      0x00,                                           ## Version
+      0x02,                                           ## Flags
+      0x00, 0x50, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Function 0x5000
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Type ID 0x0
+      0x01,                                           ## 1 direct callees
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Callee 0x0
+    ]
+Symbols:
+  - Name:    main
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x1000
+  - Name:    helper
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x2000
+  - Name:    leaf
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x3000
+  - Name:    api
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x4000
+  - Name:    api_alias
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x4000
+  - Name:    ext_caller
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x5000
+  - Name:    asm_fn
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x6000
+DynamicSymbols:
+  - Name:    main
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x1000
+  - Name:    api
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x4000

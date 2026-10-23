@@ -32,6 +32,19 @@ defm red_zone
          "Bytes added to every leaf function for the red zone below its stack "
          "pointer; the default is the ABI's size, 128 on x86-64, 288 on PPC64 "
          "and 0 elsewhere">;
+defm max_stack_usage
+    : Eq<"max-stack-usage", "<bytes>",
+         "Fail if an entry point without a --limit of its own may use more "
+         "than <bytes> of stack, or if its estimate is only a lower bound">;
+defm limit
+    : Eq<"limit", "<name>=<bytes>",
+         "Fail if the function may use more than <bytes> of stack, or if its "
+         "estimate is only a lower bound. The function is analyzed even when "
+         "it is not an entry point otherwise. Repeatable.">;
+defm leaf
+    : Eq<"leaf", "<name>",
+         "Fail if the function makes any call. The function is analyzed even "
+         "when it is not an entry point otherwise. Repeatable.">;
 def json : FF<"json", "Write the report as JSON">;
 def symbolizer_markup
     : FF<"symbolizer-markup",

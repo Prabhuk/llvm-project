@@ -64,6 +64,26 @@ x86-64 and 288 on PPC64, and 0 elsewhere. Pass 0 for code built with
 `-mno-red-zone`.
 :::
 
+:::{option} --max-stack-usage=<bytes>
+Fail, with exit status 1, if any analyzed function without a `--limit` of its
+own may use more than *bytes* of stack. A limit is a guarantee, so an estimate
+that is only a lower bound fails it whatever its value.
+:::
+
+:::{option} --limit=<name>=<bytes>
+Fail if the functions named *name* may use more than *bytes* of stack, under
+the same rule as `--max-stack-usage`, which this overrides for them. The
+functions are analyzed even when they are not entry points otherwise. When
+several limits name one function, through aliases or repeated options, the
+smallest applies. The option is repeatable.
+:::
+
+:::{option} --leaf=<name>
+Fail if the functions named *name* make any call, directly or indirectly, or
+have no call graph information. The functions are analyzed even when they are
+not entry points otherwise. The option is repeatable.
+:::
+
 :::{option} --json
 Write the report as JSON instead of text. See JSON OUTPUT below.
 :::
@@ -221,6 +241,22 @@ function, each as the caller and the type ID, and
 indirect calls might reach a target of unknown type. Unlike the text report,
 the JSON report has no size limits.
 
+## VERIFICATION
+
+With `--max-stack-usage`, `--limit` or `--leaf`, the report is followed by an
+error for every function that breaks the policy, and the exit status is 1. An
+error for a function over its limit shows the path that reaches the limit, and
+one for a lower bound shows what the analysis could not see, so that the
+output of a build step says what to fix. With `--symbolizer-markup`, the
+errors carry the same markup as the report.
+
+```
+error: main (0x1000) uses 4296 bytes of stack, more than the limit of 4096 bytes:
+  main (0x1000): 16 bytes + 8 bytes call overhead
+  big (0x2000): 4096 bytes + 8 bytes call overhead
+  helper (0x3000): 32 bytes + 128 bytes red zone + 8 bytes call overhead
+```
+
 ## LIMITATIONS
 
 The analysis trusts the call graph in the file. A function that makes calls
@@ -234,6 +270,8 @@ user's word that it is never reached.
 
 ## EXIT STATUS
 
-{program}`llvm-stack-size` exits with 0 when the report was produced, whether
-or not the estimates are exact, and with 1 when the file could not be analyzed
-or an option was invalid.
+{program}`llvm-stack-size` exits with 0 when the report was produced and no
+policy was broken, and with 1 when a function broke a `--max-stack-usage`,
+`--limit` or `--leaf` policy, when the file could not be analyzed, or when an
+option was invalid. Without a policy the estimates need not be exact for the
+exit status to be 0.

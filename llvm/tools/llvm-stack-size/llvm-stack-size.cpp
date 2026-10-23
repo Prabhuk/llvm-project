@@ -13,6 +13,9 @@
 
 #include "lib/StackSizeEstimator.h"
 #include "lib/StackSizeGraph.h"
+#include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/STLFunctionalExtras.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/BinaryFormat/ELF.h"
 #include "llvm/Object/Binary.h"
@@ -163,9 +166,28 @@ void printListed(raw_ostream &OS, StringRef Indent, ArrayRef<T> Items,
        << "\n";
 }
 
+/// Describes what \p F calls: its direct callees, the targets of its indirect
+/// calls, and the type IDs of indirect calls with no known target, naming at
+/// most MaxNamed of them.
+std::string describeCallees(const Function &F) {
+  SmallVector<std::string, 4> Parts;
+  for (const Function *Callee : F.DirectCallees)
+    Parts.push_back(describe(*Callee));
+  for (const IndirectCallSite &Site : F.IndirectCalls)
+    for (const Function *Target : Site.Targets)
+      Parts.push_back(describe(*Target) + " indirectly");
+  for (uint64_t TypeId : F.UnresolvedIndirectTypeIds)
+    Parts.push_back("an unknown function of type ID 0x" +
+                    utohexstr(TypeId, true));
+  std::string S = join(ArrayRef(Parts).take_front(MaxNamed), ", ");
+  if (Parts.size() > MaxNamed)
+    S += " and " + utostr(Parts.size() - MaxNamed) + " more";
+  return S;
+}
+
 void printFrame(raw_ostream &OS, const StackSizeEstimator &Estimator,
-                const Function &F) {
-  OS << "    " << describe(F) << ": ";
+                const Function &F, StringRef Indent = "    ") {
+  OS << Indent << describe(F) << ": ";
   if (F.FrameSize)
     OS << *F.FrameSize << " bytes";
   else
@@ -182,16 +204,16 @@ void printFrame(raw_ostream &OS, const StackSizeEstimator &Estimator,
 /// Prints the frames of a max stack path. A recursive component on the path
 /// lists at most MaxListed of its members, then the rest as a count.
 void printPath(raw_ostream &OS, const StackSizeEstimator &Estimator,
-               ArrayRef<PathStep> Path) {
+               ArrayRef<PathStep> Path, StringRef Indent = "    ") {
   for (const PathStep &Step : Path) {
     for (const Function *F : Step.Functions.take_front(MaxListed))
-      printFrame(OS, Estimator, *F);
+      printFrame(OS, Estimator, *F, Indent);
     if (Step.Functions.size() <= MaxListed)
       continue;
     uint64_t More = 0;
     for (const Function *F : Step.Functions.drop_front(MaxListed))
       More = SaturatingAdd(More, Estimator.getFrameUsage(*F));
-    OS << "    and " << Step.Functions.size() - MaxListed
+    OS << Indent << "and " << Step.Functions.size() - MaxListed
        << " more functions of this cycle with " << More << " more bytes\n";
   }
 }
@@ -391,9 +413,11 @@ void writeEstimate(json::OStream &J, const Estimate &E) {
   });
 }
 
+/// Writes the report, calling \p Observe on every estimate as it is written.
 void writeReport(json::OStream &J, StringRef File, const StackSizeGraph &G,
                  const StackSizeEstimator &Estimator,
-                 ArrayRef<EntryPoint> Entries) {
+                 ArrayRef<EntryPoint> Entries,
+                 function_ref<void(const Estimate &)> Observe) {
   J.object([&] {
     J.attribute("file", File);
     J.attribute("call_frame_overhead",
@@ -414,8 +438,11 @@ void writeReport(json::OStream &J, StringRef File, const StackSizeGraph &G,
         writeUnknown(J, Estimator, I);
     });
     J.attributeArray("entry_functions", [&] {
-      for (const EntryPoint &Entry : Entries)
-        writeEstimate(J, Estimator.estimate(Entry));
+      for (const EntryPoint &Entry : Entries) {
+        Estimate E = Estimator.estimate(Entry);
+        writeEstimate(J, E);
+        Observe(E);
+      }
     });
   });
 }
@@ -468,10 +495,30 @@ int llvm_stack_size_main(int Argc, char **Argv, const llvm::ToolContext &) {
     Out = Value;
     return true;
   };
-  std::optional<uint64_t> CallFrameOverhead, RedZoneSize;
+  std::optional<uint64_t> CallFrameOverhead, RedZoneSize, MaxStackUsage;
   if (!ParseBytes(OPT_call_frame_overhead_EQ, CallFrameOverhead) ||
-      !ParseBytes(OPT_red_zone_EQ, RedZoneSize))
+      !ParseBytes(OPT_red_zone_EQ, RedZoneSize) ||
+      !ParseBytes(OPT_max_stack_usage_EQ, MaxStackUsage))
     return 1;
+
+  // The functions that --limit and --leaf name are analyzed in addition to
+  // the entry points, since a policy for a function needs its estimate.
+  std::vector<std::pair<std::string, uint64_t>> Limits;
+  for (StringRef Spec : Args.getAllArgValues(OPT_limit_EQ)) {
+    auto [Name, Bytes] = Spec.rsplit('=');
+    uint64_t Limit;
+    if (Name.empty() || Bytes.getAsInteger(0, Limit)) {
+      reportError("invalid --limit: '" + Spec +
+                  "', expected <function>=<bytes>");
+      return 1;
+    }
+    Limits.emplace_back(Name.str(), Limit);
+  }
+  std::vector<std::string> Leaves = Args.getAllArgValues(OPT_leaf_EQ);
+  std::vector<std::string> PolicySpecs;
+  for (const auto &[Name, Limit] : Limits)
+    PolicySpecs.push_back(Name);
+  llvm::append_range(PolicySpecs, Leaves);
 
   Expected<OwningBinary<Binary>> BinaryOrErr = createBinary(InputPath);
   if (!BinaryOrErr) {
@@ -505,6 +552,32 @@ int llvm_stack_size_main(int Argc, char **Argv, const llvm::ToolContext &) {
     reportError(toString(EntriesOrErr.takeError()));
     return 1;
   }
+  if (!PolicySpecs.empty()) {
+    Expected<std::vector<EntryPoint>> PolicyEntriesOrErr =
+        resolveEntryPoints(G, PolicySpecs);
+    if (!PolicyEntriesOrErr) {
+      reportError(toString(PolicyEntriesOrErr.takeError()));
+      return 1;
+    }
+    for (EntryPoint &Entry : *PolicyEntriesOrErr)
+      if (llvm::none_of(*EntriesOrErr,
+                        [&](const EntryPoint &E) { return E.F == Entry.F; }))
+        EntriesOrErr->push_back(std::move(Entry));
+  }
+
+  // The tightest limit named for a function wins, over --max-stack-usage and
+  // over limits named for its other names.
+  DenseMap<const Function *, uint64_t> LimitOf;
+  for (const auto &[Name, Limit] : Limits)
+    for (const EntryPoint &Entry : cantFail(resolveEntryPoints(G, {Name}))) {
+      auto [It, Inserted] = LimitOf.try_emplace(Entry.F, Limit);
+      if (!Inserted)
+        It->second = std::min(It->second, Limit);
+    }
+  DenseSet<const Function *> MustBeLeaf;
+  for (const std::string &Name : Leaves)
+    for (const EntryPoint &Entry : cantFail(resolveEntryPoints(G, {Name})))
+      MustBeLeaf.insert(Entry.F);
 
   std::optional<ToolOutputFile> Out;
   raw_ostream *OS = &outs();
@@ -521,32 +594,81 @@ int llvm_stack_size_main(int Argc, char **Argv, const llvm::ToolContext &) {
 
   UseSymbolizerMarkup = Args.hasArg(OPT_symbolizer_markup);
   StackSizeEstimator Estimator(G, Opts);
+
+  // The policy is checked as each estimate is produced, and the errors are
+  // reported after the report, so that neither is kept whole in memory.
+  // A limit is a guarantee, so an estimate that is only a lower bound fails
+  // it whatever its value.
+  std::vector<std::string> Errors;
+  auto Verify = [&](const Estimate &E) {
+    const Function &F = *E.Entry.F;
+    std::optional<uint64_t> Limit = MaxStackUsage;
+    if (auto It = LimitOf.find(&F); It != LimitOf.end())
+      Limit = It->second;
+    if (Limit) {
+      if (E.IsLowerBound) {
+        std::string Msg;
+        raw_string_ostream MS(Msg);
+        MS << describe(F) << " may use more than " << *Limit
+           << " bytes of stack, its estimate of " << E.MaxStackUsage
+           << " bytes is only a lower bound (";
+        printExpression(MS, Estimator, E.Expression);
+        if (E.Expression.Coarsened)
+          MS << ", coarsened";
+        MS << ") because:\n";
+        printLowerBoundReasons(MS, Estimator, E, "  ");
+        Errors.push_back(std::move(Msg));
+      } else if (E.MaxStackUsage > *Limit) {
+        std::string Msg;
+        raw_string_ostream MS(Msg);
+        MS << describe(F) << " uses " << E.MaxStackUsage
+           << " bytes of stack, more than the limit of " << *Limit
+           << " bytes:\n";
+        printPath(MS, Estimator, E.MaxStackPath, "  ");
+        Errors.push_back(std::move(Msg));
+      }
+    }
+    if (MustBeLeaf.contains(&F)) {
+      if (!F.HasRecord)
+        Errors.push_back(describe(F) + " must be a leaf function but has no "
+                                       "call graph information");
+      else if (F.makesCalls())
+        Errors.push_back(describe(F) + " must be a leaf function but calls " +
+                         describeCallees(F));
+    }
+  };
+
   if (Args.hasArg(OPT_json)) {
     json::OStream J(*OS, /*IndentSize=*/2);
-    writeReport(J, InputPath, G, Estimator, *EntriesOrErr);
+    writeReport(J, InputPath, G, Estimator, *EntriesOrErr, Verify);
     *OS << "\n";
-    if (Out)
-      Out->keep();
-    return 0;
+  } else {
+    if (UseSymbolizerMarkup)
+      printSymbolizerContext(*OS, *Obj);
+    if (Opts.CallFrameOverhead || Opts.RedZoneSize)
+      *OS << "Call frame overhead: " << Opts.CallFrameOverhead
+          << " bytes, red zone: " << Opts.RedZoneSize << " bytes\n";
+    if (!G.getUnknownTypeIndirectTargets().empty()) {
+      *OS << "Indirect call targets of unknown type:\n";
+      printListed(
+          *OS, "  ", G.getUnknownTypeIndirectTargets(), "functions",
+          [&](const Function *F) { *OS << "  " << describe(*F) << "\n"; });
+    }
+    for (const EntryPoint &Entry : *EntriesOrErr) {
+      Estimate E = Estimator.estimate(Entry);
+      *OS << "\n";
+      printEstimate(*OS, Estimator, E);
+      Verify(E);
+    }
   }
-
-  if (UseSymbolizerMarkup)
-    printSymbolizerContext(*OS, *Obj);
-  if (Opts.CallFrameOverhead || Opts.RedZoneSize)
-    *OS << "Call frame overhead: " << Opts.CallFrameOverhead
-        << " bytes, red zone: " << Opts.RedZoneSize << " bytes\n";
-  if (!G.getUnknownTypeIndirectTargets().empty()) {
-    *OS << "Indirect call targets of unknown type:\n";
-    printListed(
-        *OS, "  ", G.getUnknownTypeIndirectTargets(), "functions",
-        [&](const Function *F) { *OS << "  " << describe(*F) << "\n"; });
-  }
-  for (const EntryPoint &Entry : *EntriesOrErr) {
-    *OS << "\n";
-    printEstimate(*OS, Estimator, Estimator.estimate(Entry));
-  }
-
   if (Out)
     Out->keep();
-  return 0;
+
+  if (Errors.empty())
+    return 0;
+  if (UseSymbolizerMarkup)
+    printSymbolizerContext(errs(), *Obj);
+  for (const std::string &Msg : Errors)
+    reportError(StringRef(Msg).rtrim('\n'));
+  return 1;
 }
