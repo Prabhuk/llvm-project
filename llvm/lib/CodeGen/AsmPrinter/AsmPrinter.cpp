@@ -1838,7 +1838,7 @@ void AsmPrinter::emitCallGraphSection(const MachineFunction &MF,
   // 8) Each unique indirect target type id.
   const DataLayout &DL = getDataLayout();
   unsigned ProgramPointerSize = DL.getPointerSize(DL.getProgramAddressSpace());
-  OutStreamer->emitInt8(CallGraphSectionFormatVersion::V_0);
+  OutStreamer->emitInt8(callgraph::V_0);
   OutStreamer->emitInt8(static_cast<uint8_t>(CGFlags));
   OutStreamer->emitSymbolValue(getSymbol(&F), ProgramPointerSize);
   const auto *TypeId = extractNumericCGTypeId(F);

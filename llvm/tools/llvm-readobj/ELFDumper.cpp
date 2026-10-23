@@ -5392,7 +5392,7 @@ ELFDumper<ELFT>::processCallGraphSection(const Elf_Shdr *CGSection) {
     uint8_t FormatVersionNumber = Data.getU8(C);
     assert(C && "always expect the one byte read to succeed when C.tell() < "
                 "CGSection->sh_size is true.");
-    if (FormatVersionNumber != 0) {
+    if (FormatVersionNumber > callgraph::LatestFormatVersion) {
       reportWarning(createError("unknown format version value [" +
                                 std::to_string(FormatVersionNumber) +
                                 "] in SHT_LLVM_CALL_GRAPH type section"),
@@ -5409,10 +5409,7 @@ ELFDumper<ELFT>::processCallGraphSection(const Elf_Shdr *CGSection) {
       return {};
     }
     callgraph::Flags CGFlags = static_cast<callgraph::Flags>(FlagsVal);
-    constexpr callgraph::Flags ValidFlags = callgraph::IsIndirectTarget |
-                                            callgraph::HasDirectCallees |
-                                            callgraph::HasIndirectCallees;
-    constexpr uint8_t ValidMask = static_cast<uint8_t>(ValidFlags);
+    constexpr uint8_t ValidMask = static_cast<uint8_t>(callgraph::ValidFlags);
     if ((FlagsVal & ~ValidMask) != 0) {
       reportWarning(createError("unsupported Flags value [" +
                                 std::to_string(FlagsVal) + "] "),
