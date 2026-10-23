@@ -26,6 +26,18 @@ defm exclude
 defm call_frame_overhead
     : Eq<"call-frame-overhead", "<bytes>",
          "Override per-call frame overhead in bytes (defaults to 8 on x86_64, 4 on i386, 0 otherwise)">;
+defm max_stack_usage
+    : Eq<"max-stack-usage", "<bytes>",
+         "Verify that all entry points without a --limit override use at most <bytes> of stack">;
+defm limit
+    : Eq<"limit", "<name>=<bytes>",
+         "Verify that entry point <name> uses at most <bytes> of stack (may be specified multiple times)">;
+defm leaf
+    : Eq<"leaf", "<name>",
+         "Verify that entry point <name> is a leaf function making no calls (may be specified multiple times)">;
+defm rspfile
+    : Eq<"rspfile", "<file>",
+         "Read additional command-line arguments from <file> (may be specified multiple times)">;
 def json : FF<"json", "Emit stack usage report as JSON">;
 defm output : Eq<"output", "<file>", "Write output report to <file> instead of stdout">;
 def : JoinedOrSeparate<["-"], "o">, MetaVarName<"<file>">, Alias<output_EQ>, HelpText<"Alias for --output">;

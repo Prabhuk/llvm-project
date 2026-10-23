@@ -350,4 +350,98 @@ DynamicSymbols:
       FailedWithMessage(testing::HasSubstr("ambiguous entry function name")));
 }
 
+TEST(StackSizeEstimatorTest, VerifiesStackBudgetsAndLeafFunctions) {
+  std::string StackHex = encodeStackSizesHex({{0x1000, 32}, {0x2000, 16}});
+  std::string CGHex = encodeCallGraphHex({
+      {0x1000, false, 0, {0x2000}, {}},
+      {0x2000, false, 0, {}, {}},
+  });
+
+  std::string Yaml = (Twine(R"(
+--- !ELF
+FileHeader:
+  Class:   ELFCLASS64
+  Data:    ELFDATA2LSB
+  Type:    ET_DYN
+  Machine: EM_AARCH64
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    Address: 0x1000
+    Size: 0x3000
+  - Name: .stack_sizes
+    Type: SHT_PROGBITS
+    Content: ")") + StackHex +
+                      R"("
+  - Name: .llvm.callgraph
+    Type: SHT_LLVM_CALL_GRAPH
+    Content: ")" + CGHex +
+                      R"("
+DynamicSymbols:
+  - Name: non_leaf_entry
+    Type: STT_FUNC
+    Section: .text
+    Value: 0x1000
+  - Name: non_leaf_alias
+    Type: STT_FUNC
+    Section: .text
+    Value: 0x1000
+  - Name: leaf_entry
+    Type: STT_FUNC
+    Section: .text
+    Value: 0x2000
+  - Name: asm_no_cg
+    Type: STT_FUNC
+    Section: .text
+    Value: 0x2800
+)")
+                         .str();
+
+  SmallString<0> Storage;
+  auto ObjOrErr = createELFObject(Storage, Yaml);
+  ASSERT_THAT_EXPECTED(ObjOrErr, Succeeded());
+  auto CGOrErr = ELFCallGraph::create(cast<ELFObjectFileBase>(**ObjOrErr));
+  ASSERT_THAT_EXPECTED(CGOrErr, Succeeded());
+
+  StackEstimateOptions Opts;
+  Opts.EntryPoints = {"non_leaf_entry", "leaf_entry"};
+  auto ReportOrErr = estimateStackSizes(*CGOrErr, Opts);
+  ASSERT_THAT_EXPECTED(ReportOrErr, Succeeded());
+
+  // Passing policy: non_leaf_entry (48B) <= 64, leaf_entry (16B) <= 16 & leaf.
+  {
+    StackBudgetPolicy Policy;
+    Policy.MaxStackUsage = 64;
+    Policy.Limits.push_back({"leaf_entry", 16});
+    Policy.LeafFunctions.push_back("leaf_entry");
+    EXPECT_TRUE(verifyStackBudgets(*CGOrErr, *ReportOrErr, Policy).empty());
+  }
+
+  // Exceeding budget, non-leaf violating --leaf, and conflicting alias limits.
+  {
+    StackBudgetPolicy Policy;
+    Policy.Limits.push_back({"non_leaf_entry", 32});
+    Policy.Limits.push_back({"non_leaf_alias", 64});
+    Policy.LeafFunctions.push_back("non_leaf_entry");
+    Policy.LeafFunctions.push_back("unknown_entry");
+    SmallVector<std::string, 0> Errs =
+        verifyStackBudgets(*CGOrErr, *ReportOrErr, Policy);
+    EXPECT_EQ(Errs.size(), 4u);
+  }
+
+  // Entry point without call graph fails budget check.
+  {
+    Opts.EntryPoints = {"asm_no_cg"};
+    auto AsmReportOrErr = estimateStackSizes(*CGOrErr, Opts);
+    ASSERT_THAT_EXPECTED(AsmReportOrErr, Succeeded());
+    StackBudgetPolicy Policy;
+    Policy.MaxStackUsage = 64;
+    SmallVector<std::string, 0> Errs =
+        verifyStackBudgets(*CGOrErr, *AsmReportOrErr, Policy);
+    ASSERT_EQ(Errs.size(), 1u);
+    EXPECT_NE(Errs[0].find("has no call graph information"), std::string::npos);
+  }
+}
+
 } // namespace

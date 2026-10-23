@@ -23,6 +23,7 @@
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Driver.h"
 #include "llvm/Support/FileSystem.h"
+#include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/StringSaver.h"
 #include "llvm/Support/ToolOutputFile.h"
 #include "llvm/Support/WithColor.h"
@@ -62,14 +63,57 @@ static void reportError(StringRef ToolName, Error Err) {
   });
 }
 
+/// Expand any `--rspfile=<file>` or `--rspfile <file>` arguments in-place so
+/// that response files can supply additional flags and can be tracked as
+/// dependencies for `--depfile`.
+static bool expandRspFileArgs(StringRef ToolName, int argc, char **argv,
+                              StringSaver &Saver,
+                              SmallVectorImpl<const char *> &ExpandedArgv,
+                              SmallVectorImpl<std::string> &RspFiles) {
+  ExpandedArgv.push_back(argv[0]);
+  for (int I = 1; I < argc; ++I) {
+    StringRef Arg(argv[I]);
+    StringRef RspPath;
+    if (Arg.starts_with("--rspfile=")) {
+      RspPath = Arg.drop_front(strlen("--rspfile="));
+    } else if (Arg == "--rspfile") {
+      if (I + 1 >= argc) {
+        reportError(ToolName, "--rspfile requires a file path argument");
+        return false;
+      }
+      RspPath = argv[++I];
+    } else {
+      ExpandedArgv.push_back(argv[I]);
+      continue;
+    }
+
+    RspFiles.push_back(RspPath.str());
+    ErrorOr<std::unique_ptr<MemoryBuffer>> BufOrErr =
+        MemoryBuffer::getFile(RspPath);
+    if (std::error_code EC = BufOrErr.getError()) {
+      reportError(ToolName, Twine("unable to read response file '") + RspPath +
+                                "': " + EC.message());
+      return false;
+    }
+    cl::TokenizeGNUCommandLine((*BufOrErr)->getBuffer(), Saver, ExpandedArgv);
+  }
+  return true;
+}
+
 int llvm_stack_size_main(int argc, char **argv, const llvm::ToolContext &) {
   StringRef ToolName = argv[0];
   BumpPtrAllocator A;
   StringSaver Saver(A);
+  SmallVector<const char *, 32> ExpandedArgv;
+  SmallVector<std::string, 2> RspFiles;
+  if (!expandRspFileArgs(ToolName, argc, argv, Saver, ExpandedArgv, RspFiles))
+    return 1;
+
   StackSizeOptTable Tbl;
   bool HasArgError = false;
-  opt::InputArgList Args =
-      Tbl.parseArgs(argc, argv, OPT_UNKNOWN, Saver, [&](StringRef Msg) {
+  opt::InputArgList Args = Tbl.parseArgs(
+      ExpandedArgv.size(), const_cast<char *const *>(ExpandedArgv.data()),
+      OPT_UNKNOWN, Saver, [&](StringRef Msg) {
         reportError(ToolName, Msg);
         HasArgError = true;
       });
@@ -80,6 +124,7 @@ int llvm_stack_size_main(int argc, char **argv, const llvm::ToolContext &) {
     Tbl.printHelp(outs(),
                   (Twine(ToolName) + " [options] <input-elf>").str().c_str(),
                   "LLVM whole-program ELF stack usage estimator");
+    outs() << "\nPass @FILE or --rspfile=FILE to read options from FILE.\n";
     return 0;
   }
   if (Args.hasArg(OPT_version)) {
@@ -130,6 +175,34 @@ int llvm_stack_size_main(int argc, char **argv, const llvm::ToolContext &) {
     CGOpts.CallFrameOverhead = Val;
   }
 
+  StackBudgetPolicy BudgetPolicy;
+  if (const opt::Arg *MaxArg = Args.getLastArg(OPT_max_stack_usage_EQ)) {
+    uint64_t Val = 0;
+    if (StringRef(MaxArg->getValue()).getAsInteger(0, Val)) {
+      reportError(ToolName, Twine("invalid --max-stack-usage value: ") +
+                                MaxArg->getValue());
+      return 1;
+    }
+    BudgetPolicy.MaxStackUsage = Val;
+  }
+
+  for (const std::string &LimSpec : Args.getAllArgValues(OPT_limit_EQ)) {
+    StringRef S(LimSpec);
+    auto [FuncName, LimitStr] = S.rsplit('=');
+    uint64_t LimitBytes = 0;
+    if (FuncName.empty() || LimitStr.empty() ||
+        LimitStr.getAsInteger(0, LimitBytes)) {
+      reportError(ToolName, Twine("invalid --limit specification (expected "
+                                  "<name>=<bytes>): ") +
+                                LimSpec);
+      return 1;
+    }
+    BudgetPolicy.Limits.emplace_back(FuncName.str(), LimitBytes);
+  }
+
+  for (const std::string &LeafName : Args.getAllArgValues(OPT_leaf_EQ))
+    BudgetPolicy.LeafFunctions.push_back(LeafName);
+
   Expected<OwningBinary<Binary>> BinOrErr = createBinary(InputPath);
   if (!BinOrErr) {
     reportError(ToolName, BinOrErr.takeError());
@@ -155,6 +228,16 @@ int llvm_stack_size_main(int argc, char **argv, const llvm::ToolContext &) {
       estimateStackSizes(*CGOrErr, EstOpts, InputPath);
   if (!ReportOrErr) {
     reportError(ToolName, ReportOrErr.takeError());
+    return 1;
+  }
+
+  SmallVector<std::string, 0> VerificationErrors =
+      verifyStackBudgets(*CGOrErr, *ReportOrErr, BudgetPolicy);
+  if (!VerificationErrors.empty()) {
+    for (const std::string &MarkupLine : ReportOrErr->SymbolizerMarkupContext)
+      errs() << MarkupLine << "\n";
+    for (const std::string &ErrMsg : VerificationErrors)
+      reportError(ToolName, ErrMsg);
     return 1;
   }
 
@@ -190,7 +273,10 @@ int llvm_stack_size_main(int argc, char **argv, const llvm::ToolContext &) {
                                 "': " + EC.message());
       return 1;
     }
-    DepFile.os() << OutputPath << ": " << InputPath << "\n";
+    DepFile.os() << OutputPath << ": " << InputPath;
+    for (const std::string &Rsp : RspFiles)
+      DepFile.os() << " " << Rsp;
+    DepFile.os() << "\n";
     DepFile.keep();
   }
 

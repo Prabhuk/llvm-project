@@ -763,3 +763,137 @@ void llvm::callgraph::formatTextReport(const StackEstimateReport &Report,
     }
   }
 }
+
+SmallVector<std::string, 0>
+llvm::callgraph::verifyStackBudgets(const ELFCallGraph &CG,
+                                    const StackEstimateReport &Report,
+                                    const StackBudgetPolicy &Policy) {
+  SmallVector<std::string, 0> Errors;
+  if (Policy.empty())
+    return Errors;
+
+  // Map every entry point's primary name and all defined symbol aliases at its
+  // address to the entry point index.
+  StringMap<SmallVector<size_t, 1>> NameToEPIndices;
+  for (size_t I = 0; I < Report.EntryPoints.size(); ++I) {
+    const EntryPointEstimate &EP = Report.EntryPoints[I];
+    NameToEPIndices[EP.Name].push_back(I);
+    for (const std::string &Alias : CG.getDisplayNames(EP.Address)) {
+      auto &Indices = NameToEPIndices[Alias];
+      if (!llvm::is_contained(Indices, I))
+        Indices.push_back(I);
+    }
+  }
+
+  // Track per-entry-point limit overrides and detect non-entry or conflicting
+  // limits across aliases at the same address.
+  DenseMap<size_t, std::pair<std::string, uint64_t>> EPLimits;
+  for (const auto &[LimitName, LimitBytes] : Policy.Limits) {
+    auto It = NameToEPIndices.find(LimitName);
+    if (It == NameToEPIndices.end()) {
+      Errors.push_back("limit specified for '" + LimitName +
+                       "', which is not an analyzed entry point");
+      continue;
+    }
+    for (size_t EPIdx : It->second) {
+      auto [LimIt, Inserted] =
+          EPLimits.try_emplace(EPIdx, LimitName, LimitBytes);
+      if (!Inserted && LimIt->second.second != LimitBytes) {
+        const EntryPointEstimate &EP = Report.EntryPoints[EPIdx];
+        Errors.push_back(
+            "conflicting stack limits for aliases '" + LimIt->second.first +
+            "' (" + std::to_string(LimIt->second.second) + " bytes) and '" +
+            LimitName + "' (" + std::to_string(LimitBytes) + " bytes) at " +
+            formatHexAddress(EP.Address));
+      }
+    }
+  }
+
+  DenseSet<size_t> LeafEPIndices;
+  for (const std::string &LeafName : Policy.LeafFunctions) {
+    auto It = NameToEPIndices.find(LeafName);
+    if (It == NameToEPIndices.end()) {
+      Errors.push_back("leaf specified for '" + LeafName +
+                       "', which is not an analyzed entry point");
+      continue;
+    }
+    for (size_t EPIdx : It->second)
+      LeafEPIndices.insert(EPIdx);
+  }
+
+  for (size_t I = 0; I < Report.EntryPoints.size(); ++I) {
+    const EntryPointEstimate &EP = Report.EntryPoints[I];
+    std::optional<uint64_t> EffectiveLimit = Policy.MaxStackUsage;
+    auto LimIt = EPLimits.find(I);
+    if (LimIt != EPLimits.end())
+      EffectiveLimit = LimIt->second.second;
+
+    if (EffectiveLimit.has_value()) {
+      uint64_t Limit = *EffectiveLimit;
+      if (!EP.HasCallGraph) {
+        Errors.push_back(EP.Name + " (" + formatHexAddress(EP.Address) +
+                         ") has a stack limit of " + std::to_string(Limit) +
+                         " bytes, but has no call graph information");
+      } else {
+        if (EP.MaxStackUsage > Limit) {
+          SmallVector<std::string, 8> PathStrs;
+          for (const StackFrameEntry &Frame : EP.MaxStackPath) {
+            std::string FrameDesc =
+                Frame.Name + " (" + formatSymbolizerMarkupPC(Frame.Address) +
+                ": " +
+                (Frame.StackSize ? std::to_string(*Frame.StackSize) + "B"
+                                 : std::string("unknown")) +
+                ")";
+            PathStrs.push_back(std::move(FrameDesc));
+          }
+          Errors.push_back(
+              EP.Name + " (" + formatHexAddress(EP.Address) + ") stack usage " +
+              std::to_string(EP.MaxStackUsage) + " bytes exceeds limit of " +
+              std::to_string(Limit) +
+              " bytes (max stack path: " + llvm::join(PathStrs, " -> ") + ")");
+        }
+        if (EP.IsLowerBound) {
+          Errors.push_back(
+              EP.Name + " (" + formatHexAddress(EP.Address) + ") stack usage " +
+              EP.StackUsageExpr +
+              " is only a lower bound (limit: " + std::to_string(Limit) +
+              " bytes): " + llvm::join(EP.LowerBoundReasons, "; "));
+        }
+      }
+    }
+
+    if (LeafEPIndices.contains(I)) {
+      if (!EP.HasCallGraph) {
+        Errors.push_back(
+            EP.Name + " (" + formatHexAddress(EP.Address) +
+            ") is required to be a leaf function, but has no call graph "
+            "information");
+      } else {
+        const ELFFunctionInfo *F = CG.findFunction(EP.Address);
+        assert(F && "Entry point with HasCallGraph must exist in ELFCallGraph");
+        SmallVector<std::string, 4> Callees;
+        for (uint64_t DirectAddr : F->DirectCallees) {
+          const ELFFunctionInfo *CalleeF = CG.findFunction(DirectAddr);
+          Callees.push_back(CalleeF ? CalleeF->PrimaryName
+                                    : formatHexAddress(DirectAddr));
+        }
+        for (uint64_t UninstAddr : F->UninstrumentedCallees)
+          Callees.push_back(CG.getUninstrumentedCalleeName(UninstAddr));
+        for (const ELFIndirectCallGroup &Ind : F->IndirectCalls)
+          Callees.push_back("<indirect type " + formatHexAddress(Ind.TypeId) +
+                            ">");
+        for (uint64_t UnresType : F->UnresolvedIndirectTypeIds)
+          Callees.push_back("<unresolved indirect type " +
+                            formatHexAddress(UnresType) + ">");
+
+        if (!Callees.empty()) {
+          Errors.push_back(EP.Name + " (" + formatHexAddress(EP.Address) +
+                           ") is required to be a leaf function, but calls: " +
+                           llvm::join(Callees, ", "));
+        }
+      }
+    }
+  }
+
+  return Errors;
+}

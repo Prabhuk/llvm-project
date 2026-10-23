@@ -1,0 +1,38 @@
+## Test --leaf verification.
+
+# RUN: yaml2obj %s -o %t.elf
+# RUN: llvm-stack-size %t.elf --entry-point=main --entry-point=leaf_fn --leaf=leaf_fn
+# RUN: not llvm-stack-size %t.elf --entry-point=main --entry-point=leaf_fn --leaf=main 2>&1 | FileCheck %s --check-prefix=NON-LEAF
+# RUN: not llvm-stack-size %t.elf --entry-point=main --leaf=leaf_fn 2>&1 | FileCheck %s --check-prefix=NOT-ENTRY
+
+# NON-LEAF: error: main (0x1000) is required to be a leaf function, but calls: leaf_fn
+# NOT-ENTRY: error: leaf specified for 'leaf_fn', which is not an analyzed entry point
+
+--- !ELF
+FileHeader:
+  Class:   ELFCLASS64
+  Data:    ELFDATA2LSB
+  Type:    ET_EXEC
+  Machine: EM_AARCH64
+  Entry:   0x1000
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    Address: 0x1000
+    Size: 0x2000
+  - Name: .stack_sizes
+    Type: SHT_PROGBITS
+    Content: "001000000000000010002000000000000020"
+  - Name: .llvm.callgraph
+    Type: SHT_LLVM_CALL_GRAPH
+    Content: "000200100000000000000000000000000000010020000000000000000000200000000000000000000000000000"
+Symbols:
+  - Name:    main
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x1000
+  - Name:    leaf_fn
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x2000

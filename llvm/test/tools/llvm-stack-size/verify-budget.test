@@ -1,0 +1,79 @@
+## Test --max-stack-usage, --limit, and --rspfile verification.
+
+# RUN: yaml2obj --docnum=1 %s -o %t.elf
+# RUN: llvm-stack-size %t.elf --max-stack-usage=64
+# RUN: llvm-stack-size %t.elf --max-stack-usage=32 --limit=main=48
+
+# RUN: echo "--max-stack-usage=64" > %t.rsp
+# RUN: llvm-stack-size %t.elf --rspfile=%t.rsp -o %t.out --depfile=%t.d
+# RUN: FileCheck %s --check-prefix=DEP < %t.d
+# DEP: .out: {{.*}}.elf {{.*}}.rsp
+
+# RUN: not llvm-stack-size %t.elf --max-stack-usage=32 2>&1 | FileCheck %s --check-prefix=EXCEED
+# EXCEED: error: main (0x1000) stack usage 48 bytes exceeds limit of 32 bytes (max stack path: main ({{[{][{][{]pc:0x1000[}][}][}]}}: 16B) -> helper ({{[{][{][{]pc:0x2000[}][}][}]}}: 32B))
+
+# RUN: not llvm-stack-size %t.elf --limit=not_an_entry=32 2>&1 | FileCheck %s --check-prefix=NOT-ENTRY
+# NOT-ENTRY: error: limit specified for 'not_an_entry', which is not an analyzed entry point
+
+## Lower-bound entry points fail budget verification even if known constant <= limit.
+# RUN: yaml2obj --docnum=2 %s -o %t.lb.elf
+# RUN: not llvm-stack-size %t.lb.elf --max-stack-usage=1024 2>&1 | FileCheck %s --check-prefix=LOWER-BOUND
+# LOWER-BOUND: error: main (0x1000) stack usage 16 + calls(<external>) is only a lower bound (limit: 1024 bytes): Calls uninstrumented function: <external> (0x0) (called by main)
+
+--- !ELF
+FileHeader:
+  Class:   ELFCLASS64
+  Data:    ELFDATA2LSB
+  Type:    ET_EXEC
+  Machine: EM_AARCH64
+  Entry:   0x1000
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    Address: 0x1000
+    Size: 0x2000
+  - Name: .stack_sizes
+    Type: SHT_PROGBITS
+    # 0x1000 -> 16, 0x2000 -> 32
+    Content: "001000000000000010002000000000000020"
+  - Name: .llvm.callgraph
+    Type: SHT_LLVM_CALL_GRAPH
+    # 0x1000 calls 0x2000; 0x2000 is a leaf.
+    Content: "000200100000000000000000000000000000010020000000000000000000200000000000000000000000000000"
+Symbols:
+  - Name:    main
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x1000
+  - Name:    helper
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x2000
+
+--- !ELF
+FileHeader:
+  Class:   ELFCLASS64
+  Data:    ELFDATA2LSB
+  Type:    ET_EXEC
+  Machine: EM_AARCH64
+  Entry:   0x1000
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    Address: 0x1000
+    Size: 0x1000
+  - Name: .stack_sizes
+    Type: SHT_PROGBITS
+    # 0x1000 -> 16
+    Content: "001000000000000010"
+  - Name: .llvm.callgraph
+    Type: SHT_LLVM_CALL_GRAPH
+    # 0x1000 calls 0x0 (<external>)
+    Content: "000200100000000000000000000000000000010000000000000000"
+Symbols:
+  - Name:    main
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x1000

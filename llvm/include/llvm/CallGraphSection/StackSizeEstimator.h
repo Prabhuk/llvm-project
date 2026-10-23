@@ -115,6 +115,32 @@ struct StackEstimateReport {
   SmallVector<EntryPointEstimate, 0> EntryPoints;
 };
 
+/// Policy constraints for verifying entry-point stack budgets and leaf
+/// functions.
+struct StackBudgetPolicy {
+  /// Default maximum stack usage in bytes for all entry points without a
+  /// per-function limit override.
+  std::optional<uint64_t> MaxStackUsage;
+
+  /// Per-entry-point stack usage limits (`<function-name>`, `<bytes>`).
+  SmallVector<std::pair<std::string, uint64_t>, 0> Limits;
+
+  /// Entry points required to be leaf functions (making zero calls).
+  SmallVector<std::string, 0> LeafFunctions;
+
+  bool empty() const {
+    return !MaxStackUsage.has_value() && Limits.empty() &&
+           LeafFunctions.empty();
+  }
+};
+
+/// Verify that \p Report and \p CG satisfy all stack budget and leaf
+/// constraints in \p Policy. Returns a list of human-readable error messages
+/// (empty if verification succeeds).
+LLVM_ABI SmallVector<std::string, 0>
+verifyStackBudgets(const ELFCallGraph &CG, const StackEstimateReport &Report,
+                   const StackBudgetPolicy &Policy);
+
 /// Estimate stack usage across the given \p CG according to \p Opts.
 LLVM_ABI Expected<StackEstimateReport>
 estimateStackSizes(const ELFCallGraph &CG,
