@@ -56,6 +56,10 @@ x86-64 and 288 on PPC64, and 0 elsewhere. Pass 0 for code built with
 `-mno-red-zone`.
 :::
 
+:::{option} --json
+Write the report as JSON instead of text. See JSON OUTPUT below.
+:::
+
 :::{option} -o <file>, --output=<file>
 Write the report to *file* instead of standard output.
 :::
@@ -127,6 +131,80 @@ their unknowns, which bounds every path it stands for. The expression is then
 marked `(coarsened)`: it is an upper bound of the exact expression rather than
 equal to it, and its largest constant is still the stack usage. The term limit
 only ever affects the expression, never the stack usage or the reasons.
+
+## JSON OUTPUT
+
+With `--json` the report is one object, written one entry function at a time.
+Addresses and type IDs are integers. The recursive components and the unknowns
+of the expressions are listed once, for the whole file, and everything else
+refers to them by index, so that the report does not repeat a large component
+for every entry function that reaches it.
+
+```json
+{
+  "file": "libfoo.so",
+  "call_frame_overhead": 8,
+  "red_zone_size": 128,
+  "unknown_type_indirect_targets": [ 12288 ],
+  "cycles": [
+    [ { "address": 8192, "name": "rec", "stack": 64 } ]
+  ],
+  "unknowns": [
+    { "name": "calls(<external>)", "kind": "calls", "address": 0 },
+    { "name": "cycle(rec)", "kind": "cycle", "cycle": 0 }
+  ],
+  "entry_functions": [
+    {
+      "entry_function": "main",
+      "address": 4096,
+      "max_stack_usage": 96,
+      "is_lower_bound": true,
+      "stack_usage_expression": {
+        "terms": [
+          { "constant": 96, "unknowns": [ 1 ] },
+          { "constant": 32, "unknowns": [ 0 ] }
+        ],
+        "coarsened": false
+      },
+      "max_stack_path": [
+        { "address": 4096, "name": "main", "stack": 16 },
+        { "cycle": 0 }
+      ],
+      "cycles": [ 0 ],
+      "unknown_stack_sizes": [],
+      "uninstrumented_callees": [
+        { "address": 0, "name": "<external>", "callers": [ 4096 ] }
+      ],
+      "unresolved_indirect_calls": [],
+      "indirect_calls_with_unknown_type_targets": []
+    }
+  ]
+}
+```
+
+`unknown_type_indirect_targets` lists the functions of the file that are
+indirect call targets of unknown type. `cycles` lists every recursive
+component of the file by its members, each with its frame size as `stack`,
+or `null` when it is unknown. `unknowns` lists the unknowns of the
+expressions, each with its name as in the text report and its `kind`:
+`frame` and `calls` name the function by `address`, `cycle` the component by
+its index in `cycles`, and `indirect` the type of the call by `type_id`, with
+0 standing for the indirect call targets of unknown type.
+
+Per entry function, `stack_usage_expression` is the maximum of its `terms`,
+each a `constant` plus the unknowns given by their indexes in `unknowns`, and
+`coarsened` says whether terms were merged, as described under OUTPUT.
+`max_stack_path` lists the functions on the path as `address`, `name` and
+`stack`, or a recursive component as its index in `cycles`, without the red
+zone and call frame overhead that `max_stack_usage` includes. `cycles` gives
+the reachable recursive components as indexes, `unknown_stack_sizes` the
+reachable functions without a frame size, `uninstrumented_callees` the
+reachable functions without call graph information with their callers,
+`unresolved_indirect_calls` the reachable indirect calls whose type matches no
+function, each as the caller and the type ID, and
+`indirect_calls_with_unknown_type_targets` the reachable functions whose
+indirect calls might reach a target of unknown type. Unlike the text report,
+the JSON report has no size limits.
 
 ## LIMITATIONS
 

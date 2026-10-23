@@ -22,6 +22,7 @@
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Driver.h"
 #include "llvm/Support/FileSystem.h"
+#include "llvm/Support/JSON.h"
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/StringSaver.h"
 #include "llvm/Support/ToolOutputFile.h"
@@ -216,6 +217,142 @@ void printEstimate(raw_ostream &OS, const StackSizeEstimator &Estimator,
   printPath(OS, Estimator, E.MaxStackPath);
 }
 
+/// The JSON report is streamed, one entry point at a time, so that its size
+/// in memory does not grow with the number of entry points.
+
+void writeAddresses(json::OStream &J, ArrayRef<const Function *> Fs) {
+  J.array([&] {
+    for (const Function *F : Fs)
+      J.value(F->Address);
+  });
+}
+
+/// Writes a function as its address, name and frame size, the last null when
+/// it is unknown.
+void writeFunction(json::OStream &J, const Function &F) {
+  J.object([&] {
+    J.attribute("address", F.Address);
+    J.attribute("name", F.getDisplayName());
+    if (F.FrameSize)
+      J.attribute("stack", *F.FrameSize);
+    else
+      J.attribute("stack", nullptr);
+  });
+}
+
+void writeUnknown(json::OStream &J, const StackSizeEstimator &Estimator,
+                  unsigned Index) {
+  const Unknown &U = Estimator.unknowns()[Index];
+  J.object([&] {
+    J.attribute("name", Estimator.unknownNames()[Index]);
+    switch (U.K) {
+    case Unknown::Kind::Frame:
+      J.attribute("kind", "frame");
+      J.attribute("address", U.F->Address);
+      break;
+    case Unknown::Kind::Calls:
+      J.attribute("kind", "calls");
+      J.attribute("address", U.F->Address);
+      break;
+    case Unknown::Kind::Cycle:
+      J.attribute("kind", "cycle");
+      J.attribute("cycle", U.Cycle);
+      break;
+    case Unknown::Kind::Indirect:
+      J.attribute("kind", "indirect");
+      J.attribute("type_id", U.TypeId);
+      break;
+    }
+  });
+}
+
+void writeEstimate(json::OStream &J, const Estimate &E) {
+  J.object([&] {
+    J.attribute("entry_function", E.Entry.Name);
+    J.attribute("address", E.Entry.F->Address);
+    J.attribute("max_stack_usage", E.MaxStackUsage);
+    J.attribute("is_lower_bound", E.IsLowerBound);
+    J.attributeObject("stack_usage_expression", [&] {
+      J.attributeArray("terms", [&] {
+        for (const StackUsageTerm &T : E.Expression.Terms)
+          J.object([&] {
+            J.attribute("constant", T.Constant);
+            J.attributeArray("unknowns", [&] {
+              for (unsigned Id : T.Unknowns)
+                J.value(Id);
+            });
+          });
+      });
+      J.attribute("coarsened", E.Expression.Coarsened);
+    });
+    J.attributeArray("max_stack_path", [&] {
+      for (const PathStep &Step : E.MaxStackPath) {
+        if (Step.Cycle)
+          J.object([&] { J.attribute("cycle", *Step.Cycle); });
+        else
+          writeFunction(J, *Step.Functions.front());
+      }
+    });
+    J.attributeArray("cycles", [&] {
+      for (unsigned Cycle : E.Cycles)
+        J.value(Cycle);
+    });
+    J.attributeBegin("unknown_stack_sizes");
+    writeAddresses(J, E.UnknownFrames);
+    J.attributeEnd();
+    J.attributeArray("uninstrumented_callees", [&] {
+      for (const UninstrumentedCallee &U : E.UninstrumentedCallees)
+        J.object([&] {
+          J.attribute("address", U.Callee->Address);
+          J.attribute("name", U.Callee->getDisplayName());
+          J.attributeBegin("callers");
+          writeAddresses(J, U.Callers);
+          J.attributeEnd();
+        });
+    });
+    J.attributeArray("unresolved_indirect_calls", [&] {
+      for (const Function *F : E.UnresolvedIndirectCallers)
+        for (uint64_t TypeId : F->UnresolvedIndirectTypeIds)
+          J.object([&] {
+            J.attribute("caller", F->Address);
+            J.attribute("type_id", TypeId);
+          });
+    });
+    J.attributeBegin("indirect_calls_with_unknown_type_targets");
+    writeAddresses(J, E.IndirectCallersWithUntypedTargets);
+    J.attributeEnd();
+  });
+}
+
+void writeReport(json::OStream &J, StringRef File, const StackSizeGraph &G,
+                 const StackSizeEstimator &Estimator,
+                 ArrayRef<EntryPoint> Entries) {
+  J.object([&] {
+    J.attribute("file", File);
+    J.attribute("call_frame_overhead",
+                Estimator.getOptions().CallFrameOverhead);
+    J.attribute("red_zone_size", Estimator.getOptions().RedZoneSize);
+    J.attributeBegin("unknown_type_indirect_targets");
+    writeAddresses(J, G.getUnknownTypeIndirectTargets());
+    J.attributeEnd();
+    J.attributeArray("cycles", [&] {
+      for (ArrayRef<const Function *> Cycle : Estimator.cycles())
+        J.array([&] {
+          for (const Function *F : Cycle)
+            writeFunction(J, *F);
+        });
+    });
+    J.attributeArray("unknowns", [&] {
+      for (unsigned I = 0, N = Estimator.unknowns().size(); I != N; ++I)
+        writeUnknown(J, Estimator, I);
+    });
+    J.attributeArray("entry_functions", [&] {
+      for (const EntryPoint &Entry : Entries)
+        writeEstimate(J, Estimator.estimate(Entry));
+    });
+  });
+}
+
 } // namespace
 
 int llvm_stack_size_main(int Argc, char **Argv, const llvm::ToolContext &) {
@@ -316,6 +453,15 @@ int llvm_stack_size_main(int Argc, char **Argv, const llvm::ToolContext &) {
   }
 
   StackSizeEstimator Estimator(G, Opts);
+  if (Args.hasArg(OPT_json)) {
+    json::OStream J(*OS, /*IndentSize=*/2);
+    writeReport(J, InputPath, G, Estimator, *EntriesOrErr);
+    *OS << "\n";
+    if (Out)
+      Out->keep();
+    return 0;
+  }
+
   if (Opts.CallFrameOverhead || Opts.RedZoneSize)
     *OS << "Call frame overhead: " << Opts.CallFrameOverhead
         << " bytes, red zone: " << Opts.RedZoneSize << " bytes\n";

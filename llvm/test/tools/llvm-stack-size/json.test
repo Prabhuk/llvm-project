@@ -1,0 +1,147 @@
+## --json writes the report as JSON, with addresses as integers. The report
+## is streamed one entry point at a time, and the cycles and the unknowns of
+## the expressions are listed once for the file and referred to by index.
+
+# RUN: yaml2obj %s -o %t
+# RUN: llvm-stack-size %t --json | FileCheck %s --match-full-lines --strict-whitespace
+# RUN: llvm-stack-size %t --json -o %t.json && FileCheck %s --match-full-lines --strict-whitespace < %t.json
+
+#      CHECK:{
+# CHECK-NEXT:  "file": "{{.*}}json.test.tmp",
+# CHECK-NEXT:  "call_frame_overhead": 8,
+# CHECK-NEXT:  "red_zone_size": 128,
+# CHECK-NEXT:  "unknown_type_indirect_targets": [
+# CHECK-NEXT:    12288
+# CHECK-NEXT:  ],
+# CHECK-NEXT:  "cycles": [
+# CHECK-NEXT:    [
+# CHECK-NEXT:      {
+# CHECK-NEXT:        "address": 8192,
+# CHECK-NEXT:        "name": "rec",
+# CHECK-NEXT:        "stack": 64
+# CHECK-NEXT:      }
+# CHECK-NEXT:    ]
+# CHECK-NEXT:  ],
+# CHECK-NEXT:  "unknowns": [
+# CHECK-NEXT:    {
+# CHECK-NEXT:      "name": "calls(<external>)",
+# CHECK-NEXT:      "kind": "calls",
+# CHECK-NEXT:      "address": 0
+# CHECK-NEXT:    },
+# CHECK-NEXT:    {
+# CHECK-NEXT:      "name": "cycle(rec)",
+# CHECK-NEXT:      "kind": "cycle",
+# CHECK-NEXT:      "cycle": 0
+# CHECK-NEXT:    },
+# CHECK-NEXT:    {
+# CHECK-NEXT:      "name": "frame(untyped)",
+# CHECK-NEXT:      "kind": "frame",
+# CHECK-NEXT:      "address": 12288
+# CHECK-NEXT:    }
+# CHECK-NEXT:  ],
+# CHECK-NEXT:  "entry_functions": [
+# CHECK-NEXT:    {
+# CHECK-NEXT:      "entry_function": "main",
+# CHECK-NEXT:      "address": 4096,
+# CHECK-NEXT:      "max_stack_usage": 96,
+# CHECK-NEXT:      "is_lower_bound": true,
+# CHECK-NEXT:      "stack_usage_expression": {
+# CHECK-NEXT:        "terms": [
+# CHECK-NEXT:          {
+# CHECK-NEXT:            "constant": 96,
+# CHECK-NEXT:            "unknowns": [
+# CHECK-NEXT:              1
+# CHECK-NEXT:            ]
+# CHECK-NEXT:          },
+# CHECK-NEXT:          {
+# CHECK-NEXT:            "constant": 32,
+# CHECK-NEXT:            "unknowns": [
+# CHECK-NEXT:              0
+# CHECK-NEXT:            ]
+# CHECK-NEXT:          }
+# CHECK-NEXT:        ],
+# CHECK-NEXT:        "coarsened": false
+# CHECK-NEXT:      },
+# CHECK-NEXT:      "max_stack_path": [
+# CHECK-NEXT:        {
+# CHECK-NEXT:          "address": 4096,
+# CHECK-NEXT:          "name": "main",
+# CHECK-NEXT:          "stack": 16
+# CHECK-NEXT:        },
+# CHECK-NEXT:        {
+# CHECK-NEXT:          "cycle": 0
+# CHECK-NEXT:        }
+# CHECK-NEXT:      ],
+# CHECK-NEXT:      "cycles": [
+# CHECK-NEXT:        0
+# CHECK-NEXT:      ],
+# CHECK-NEXT:      "unknown_stack_sizes": [],
+# CHECK-NEXT:      "uninstrumented_callees": [
+# CHECK-NEXT:        {
+# CHECK-NEXT:          "address": 0,
+# CHECK-NEXT:          "name": "<external>",
+# CHECK-NEXT:          "callers": [
+# CHECK-NEXT:            4096
+# CHECK-NEXT:          ]
+# CHECK-NEXT:        }
+# CHECK-NEXT:      ],
+# CHECK-NEXT:      "unresolved_indirect_calls": [],
+# CHECK-NEXT:      "indirect_calls_with_unknown_type_targets": []
+# CHECK-NEXT:    }
+# CHECK-NEXT:  ]
+# CHECK-NEXT:}
+
+--- !ELF
+FileHeader:
+  Class:   ELFCLASS64
+  Data:    ELFDATA2LSB
+  Type:    ET_EXEC
+  Machine: EM_X86_64
+  Entry:   0x1000
+Sections:
+  - Name:    .text
+    Type:    SHT_PROGBITS
+    Flags:   [ SHF_ALLOC, SHF_EXECINSTR ]
+    Address: 0x1000
+    Size:    0x10000
+  - Name: .stack_sizes
+    Type: SHT_PROGBITS
+    Entries:
+      - Address: 0x1000
+        Size:    16
+      - Address: 0x2000
+        Size:    64
+  - Name: .llvm.callgraph
+    Type: SHT_LLVM_CALL_GRAPH
+    ContentArray: [
+      0x00,                                           ## Version
+      0x02,                                           ## Flags
+      0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Function 0x1000
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Type ID 0x0
+      0x02,                                           ## 2 direct callees
+      0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Callee 0x2000
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Callee 0x0
+      0x00,                                           ## Version
+      0x02,                                           ## Flags
+      0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Function 0x2000
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Type ID 0x0
+      0x01,                                           ## 1 direct callees
+      0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Callee 0x2000
+      0x00,                                           ## Version
+      0x01,                                           ## Flags
+      0x00, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Function 0x3000
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Type ID 0x0
+    ]
+Symbols:
+  - Name:    main
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x1000
+  - Name:    rec
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x2000
+  - Name:    untyped
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x3000

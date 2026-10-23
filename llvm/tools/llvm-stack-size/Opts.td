@@ -28,6 +28,7 @@ defm red_zone
          "Bytes added to every leaf function for the red zone below its stack "
          "pointer; the default is the ABI's size, 128 on x86-64, 288 on PPC64 "
          "and 0 elsewhere">;
+def json : FF<"json", "Write the report as JSON">;
 defm output : Eq<"output", "<file>", "Write the report to <file>">;
 def : JoinedOrSeparate<["-"], "o">, Alias<output_EQ>,
       HelpText<"Alias for --output">, MetaVarName<"<file>">;
