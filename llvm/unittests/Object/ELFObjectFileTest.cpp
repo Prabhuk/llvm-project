@@ -1829,3 +1829,185 @@ FileHeader:
   EXPECT_FALSE(ELFSymHighHigh < ELFSymLowLow);
   EXPECT_FALSE(ELFSymHighLow < ELFSymLowLow);
 }
+
+// Tests for the ELFFile::decodeCallGraphSection API.
+TEST(ELFObjectFileTest, DecodeCallGraphSection) {
+  // Two records: a function at 0x1000 that is an indirect target of type
+  // 0x1234, calls 0x2000 and 0x0 directly and makes indirect calls of types
+  // 0xaa and 0xbb, and a leaf at 0x2000 with no flags.
+  StringRef Yaml = R"(
+--- !ELF
+FileHeader:
+  Class: ELFCLASS64
+  Data:  ELFDATA2LSB
+  Type:  ET_EXEC
+Sections:
+  - Name: .llvm.callgraph
+    Type: SHT_LLVM_CALL_GRAPH
+    ContentArray: [
+      0x00,                                           ## Version
+      0x07,                                           ## Flags
+      0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Function 0x1000
+      0x34, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Type ID 0x1234
+      0x02,                                           ## 2 direct callees
+      0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Callee 0x2000
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Callee 0x0
+      0x02,                                           ## 2 indirect type IDs
+      0xaa, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Type ID 0xaa
+      0xbb, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Type ID 0xbb
+      0x00,                                           ## Version
+      0x00,                                           ## Flags
+      0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Function 0x2000
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Type ID 0
+    ]
+)";
+  SmallString<0> Storage;
+  Expected<ELFObjectFile<ELF64LE>> ElfOrErr = toBinary<ELF64LE>(Storage, Yaml);
+  ASSERT_THAT_EXPECTED(ElfOrErr, Succeeded());
+  const ELFFile<ELF64LE> &Elf = ElfOrErr->getELFFile();
+  Expected<const typename ELF64LE::Shdr *> SecOrErr = Elf.getSection(1);
+  ASSERT_THAT_EXPECTED(SecOrErr, Succeeded());
+
+  Expected<std::vector<CallGraphRecord>> RecordsOrErr =
+      Elf.decodeCallGraphSection(**SecOrErr);
+  ASSERT_THAT_EXPECTED(RecordsOrErr, Succeeded());
+  ASSERT_EQ(RecordsOrErr->size(), 2u);
+
+  const CallGraphRecord &Caller = (*RecordsOrErr)[0];
+  EXPECT_EQ(Caller.Version, 0u);
+  EXPECT_TRUE(Caller.isIndirectTarget());
+  EXPECT_TRUE(Caller.hasDirectCallees());
+  EXPECT_TRUE(Caller.hasIndirectCallees());
+  EXPECT_EQ(Caller.Function, (CallGraphRecord::AddressField{2, 0x1000}));
+  EXPECT_EQ(Caller.FunctionTypeId, 0x1234u);
+  EXPECT_THAT(Caller.DirectCallees,
+              testing::ElementsAre(CallGraphRecord::AddressField{19, 0x2000},
+                                   CallGraphRecord::AddressField{27, 0x0}));
+  EXPECT_THAT(Caller.IndirectCalleeTypeIds, testing::ElementsAre(0xaa, 0xbb));
+
+  const CallGraphRecord &Leaf = (*RecordsOrErr)[1];
+  EXPECT_FALSE(Leaf.isIndirectTarget());
+  EXPECT_FALSE(Leaf.hasDirectCallees());
+  EXPECT_FALSE(Leaf.hasIndirectCallees());
+  EXPECT_EQ(Leaf.Function, (CallGraphRecord::AddressField{54, 0x2000}));
+  EXPECT_EQ(Leaf.FunctionTypeId, 0u);
+  EXPECT_TRUE(Leaf.DirectCallees.empty());
+  EXPECT_TRUE(Leaf.IndirectCalleeTypeIds.empty());
+}
+
+// The address fields of a 32-bit file are 4 bytes wide.
+TEST(ELFObjectFileTest, DecodeCallGraphSection32Bit) {
+  StringRef Yaml = R"(
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data:  ELFDATA2MSB
+  Type:  ET_EXEC
+Sections:
+  - Name: .llvm.callgraph
+    Type: SHT_LLVM_CALL_GRAPH
+    ContentArray: [
+      0x00,                                           ## Version
+      0x02,                                           ## Flags
+      0x00, 0x00, 0x10, 0x00,                         ## Function 0x1000
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Type ID 0
+      0x01,                                           ## 1 direct callee
+      0x00, 0x00, 0x20, 0x00,                         ## Callee 0x2000
+    ]
+)";
+  SmallString<0> Storage;
+  Expected<ELFObjectFile<ELF32BE>> ElfOrErr = toBinary<ELF32BE>(Storage, Yaml);
+  ASSERT_THAT_EXPECTED(ElfOrErr, Succeeded());
+  const ELFFile<ELF32BE> &Elf = ElfOrErr->getELFFile();
+  Expected<const typename ELF32BE::Shdr *> SecOrErr = Elf.getSection(1);
+  ASSERT_THAT_EXPECTED(SecOrErr, Succeeded());
+
+  Expected<std::vector<CallGraphRecord>> RecordsOrErr =
+      Elf.decodeCallGraphSection(**SecOrErr);
+  ASSERT_THAT_EXPECTED(RecordsOrErr, Succeeded());
+  ASSERT_EQ(RecordsOrErr->size(), 1u);
+  EXPECT_EQ((*RecordsOrErr)[0].Function,
+            (CallGraphRecord::AddressField{2, 0x1000}));
+  EXPECT_THAT((*RecordsOrErr)[0].DirectCallees,
+              testing::ElementsAre(CallGraphRecord::AddressField{15, 0x2000}));
+}
+
+// Tests for error paths of the ELFFile::decodeCallGraphSection API.
+TEST(ELFObjectFileTest, InvalidDecodeCallGraphSection) {
+  auto DoCheck = [&](StringRef ContentArray, const char *ErrMsg) {
+    std::string Yaml = (R"(
+--- !ELF
+FileHeader:
+  Class: ELFCLASS64
+  Data:  ELFDATA2LSB
+  Type:  ET_EXEC
+Sections:
+  - Name: .llvm.callgraph
+    Type: SHT_LLVM_CALL_GRAPH
+    ContentArray: [ )" + ContentArray +
+                        " ]\n")
+                           .str();
+    SmallString<0> Storage;
+    Expected<ELFObjectFile<ELF64LE>> ElfOrErr =
+        toBinary<ELF64LE>(Storage, Yaml);
+    ASSERT_THAT_EXPECTED(ElfOrErr, Succeeded());
+    const ELFFile<ELF64LE> &Elf = ElfOrErr->getELFFile();
+    Expected<const typename ELF64LE::Shdr *> SecOrErr = Elf.getSection(1);
+    ASSERT_THAT_EXPECTED(SecOrErr, Succeeded());
+    EXPECT_THAT_ERROR(Elf.decodeCallGraphSection(**SecOrErr).takeError(),
+                      FailedWithMessage(ErrMsg));
+  };
+
+  {
+    SCOPED_TRACE("unsupported version");
+    DoCheck("0x01",
+            "unknown format version value [1] in SHT_LLVM_CALL_GRAPH type "
+            "section");
+  }
+  {
+    SCOPED_TRACE("missing flags");
+    DoCheck("0x00", "failed while reading call graph info's Flags: unexpected "
+                    "end of data at offset 0x1 while reading [0x1, 0x2)");
+  }
+  {
+    SCOPED_TRACE("unsupported flags");
+    DoCheck("0x00, 0x08", "unsupported Flags value [8]");
+  }
+  {
+    SCOPED_TRACE("truncated function address");
+    DoCheck("0x00, 0x00, 0x00, 0x10",
+            "failed while reading call graph info function entry PC: "
+            "unexpected end of data at offset 0x4 while reading [0x2, 0xa)");
+  }
+  {
+    SCOPED_TRACE("truncated type id");
+    DoCheck("0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00",
+            "failed while reading function type ID: unexpected end of data at "
+            "offset 0xb while reading [0xa, 0x12)");
+  }
+  {
+    SCOPED_TRACE("missing direct callee count");
+    DoCheck("0x00, 0x02, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, "
+            "0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00",
+            "failed while reading number of direct callees: unable to decode "
+            "LEB128 at offset 0x00000012: malformed uleb128, extends past end");
+  }
+  {
+    // A count larger than the section can hold must fail on the missing
+    // element rather than be trusted.
+    SCOPED_TRACE("implausible direct callee count");
+    DoCheck("0x00, 0x02, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, "
+            "0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, "
+            "0xff, 0xff, 0xff, 0xff, 0x0f, "
+            "0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00",
+            "failed while reading direct callee: unexpected end of data at "
+            "offset 0x1f while reading [0x1f, 0x27)");
+  }
+  {
+    SCOPED_TRACE("truncated indirect type id");
+    DoCheck("0x00, 0x04, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, "
+            "0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0xaa",
+            "failed while reading indirect target type ID: unexpected end of "
+            "data at offset 0x14 while reading [0x13, 0x1b)");
+  }
+}

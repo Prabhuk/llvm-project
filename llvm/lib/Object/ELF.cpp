@@ -871,6 +871,94 @@ ELFFile<ELFT>::decodeBBAddrMap(const Elf_Shdr &Sec, const Elf_Shdr *RelaSec,
 }
 
 template <class ELFT>
+Expected<std::vector<CallGraphRecord>>
+ELFFile<ELFT>::decodeCallGraphSection(const Elf_Shdr &Sec) const {
+  Expected<ArrayRef<uint8_t>> ContentsOrErr = getSectionContents(Sec);
+  if (!ContentsOrErr)
+    return ContentsOrErr.takeError();
+  ArrayRef<uint8_t> Contents = *ContentsOrErr;
+
+  constexpr uint64_t AddressSize = sizeof(uintX_t);
+  DataExtractor Data(Contents, isLE());
+  DataExtractor::Cursor C(0);
+  std::vector<CallGraphRecord> Records;
+  while (C.tell() < Contents.size()) {
+    CallGraphRecord Record;
+    Record.Version = Data.getU8(C);
+    assert(C && "a byte read within the section cannot fail");
+    if (Record.Version > callgraph::LatestFormatVersion)
+      return createError("unknown format version value [" +
+                         Twine(static_cast<unsigned>(Record.Version)) +
+                         "] in SHT_LLVM_CALL_GRAPH type section");
+
+    Record.Flags = Data.getU8(C);
+    if (!C)
+      return createError("failed while reading call graph info's Flags: " +
+                         toString(C.takeError()));
+    if ((Record.Flags & ~static_cast<uint8_t>(callgraph::ValidFlags)) != 0)
+      return createError("unsupported Flags value [" +
+                         Twine(static_cast<unsigned>(Record.Flags)) + "]");
+
+    Record.Function.Offset = C.tell();
+    Record.Function.Value = Data.getUnsigned(C, AddressSize);
+    if (!C)
+      return createError(
+          "failed while reading call graph info function entry PC: " +
+          toString(C.takeError()));
+
+    Record.FunctionTypeId = Data.getU64(C);
+    if (!C)
+      return createError("failed while reading function type ID: " +
+                         toString(C.takeError()));
+
+    // Element counts come from the file. Reserve no more than the remaining
+    // bytes can hold, so that a corrupt count cannot drive a huge allocation;
+    // reading past the end then fails on the element that is missing.
+    auto PlausibleCount = [&](uint64_t Count, uint64_t ElementSize) {
+      return std::min(Count, (Contents.size() - C.tell()) / ElementSize);
+    };
+
+    if (Record.hasDirectCallees()) {
+      uint64_t NumDirectCallees = Data.getULEB128(C);
+      if (!C)
+        return createError("failed while reading number of direct callees: " +
+                           toString(C.takeError()));
+      Record.DirectCallees.reserve(
+          PlausibleCount(NumDirectCallees, AddressSize));
+      for (uint64_t I = 0; I < NumDirectCallees; ++I) {
+        CallGraphRecord::AddressField Callee;
+        Callee.Offset = C.tell();
+        Callee.Value = Data.getUnsigned(C, AddressSize);
+        if (!C)
+          return createError("failed while reading direct callee: " +
+                             toString(C.takeError()));
+        Record.DirectCallees.push_back(Callee);
+      }
+    }
+
+    if (Record.hasIndirectCallees()) {
+      uint64_t NumTypeIds = Data.getULEB128(C);
+      if (!C)
+        return createError(
+            "failed while reading number of indirect target type IDs: " +
+            toString(C.takeError()));
+      Record.IndirectCalleeTypeIds.reserve(
+          PlausibleCount(NumTypeIds, sizeof(uint64_t)));
+      for (uint64_t I = 0; I < NumTypeIds; ++I) {
+        uint64_t TypeId = Data.getU64(C);
+        if (!C)
+          return createError("failed while reading indirect target type ID: " +
+                             toString(C.takeError()));
+        Record.IndirectCalleeTypeIds.push_back(TypeId);
+      }
+    }
+
+    Records.push_back(std::move(Record));
+  }
+  return Records;
+}
+
+template <class ELFT>
 Expected<
     MapVector<const typename ELFT::Shdr *, const typename ELFT::Shdr *>>
 ELFFile<ELFT>::getSectionAndRelocations(

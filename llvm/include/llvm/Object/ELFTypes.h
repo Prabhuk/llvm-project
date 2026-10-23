@@ -821,6 +821,43 @@ template <class ELFT> struct Elf_Mips_ABIFlags {
   Elf_Word flags2;   // General flags
 };
 
+// One record of a SHT_LLVM_CALL_GRAPH (.llvm.callgraph) section, describing a
+// function and its callees. See llvm/BinaryFormat/CallGraphSection.h for the
+// encoding.
+struct CallGraphRecord {
+  // An address field of the record. In a linked file the value is the
+  // function's virtual address. In a relocatable object file it is only the
+  // addend of the relocation at Offset, which identifies the function.
+  struct AddressField {
+    uint64_t Offset = 0;
+    uint64_t Value = 0;
+
+    bool operator==(const AddressField &Other) const {
+      return Offset == Other.Offset && Value == Other.Value;
+    }
+  };
+
+  uint8_t Version = 0;
+  uint8_t Flags = 0;
+  AddressField Function;
+  // The function's type ID, or 0 if it is not an indirect call target or its
+  // type is unknown.
+  uint64_t FunctionTypeId = 0;
+  SmallVector<AddressField, 4> DirectCallees;
+  // The type IDs of the indirect calls the function makes.
+  SmallVector<uint64_t, 4> IndirectCalleeTypeIds;
+
+  bool isIndirectTarget() const {
+    return (Flags & callgraph::IsIndirectTarget) != 0;
+  }
+  bool hasDirectCallees() const {
+    return (Flags & callgraph::HasDirectCallees) != 0;
+  }
+  bool hasIndirectCallees() const {
+    return (Flags & callgraph::HasIndirectCallees) != 0;
+  }
+};
+
 } // end namespace object.
 } // end namespace llvm.
 

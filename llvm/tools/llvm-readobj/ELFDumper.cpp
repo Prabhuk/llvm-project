@@ -5383,118 +5383,26 @@ template <class ELFT> void GNUELFDumper<ELFT>::printCGProfile() {
 template <class ELFT>
 SmallVector<FunctionCallGraphInfo<ELFT>, 16>
 ELFDumper<ELFT>::processCallGraphSection(const Elf_Shdr *CGSection) {
+  Expected<std::vector<CallGraphRecord>> RecordsOrErr =
+      Obj.decodeCallGraphSection(*CGSection);
+  if (!RecordsOrErr) {
+    reportWarning(RecordsOrErr.takeError(), FileName);
+    return {};
+  }
+
   SmallVector<FunctionCallGraphInfo<ELFT>, 16> FuncCGInfos;
-  ArrayRef<uint8_t> Contents = cantFail(Obj.getSectionContents(*CGSection));
-  DataExtractor Data(Contents, Obj.isLE());
-  DataExtractor::Cursor C(0);
   uint64_t UnknownCount = 0;
-  while (C && C.tell() < CGSection->sh_size) {
-    uint8_t FormatVersionNumber = Data.getU8(C);
-    assert(C && "always expect the one byte read to succeed when C.tell() < "
-                "CGSection->sh_size is true.");
-    if (FormatVersionNumber > callgraph::LatestFormatVersion) {
-      reportWarning(createError("unknown format version value [" +
-                                std::to_string(FormatVersionNumber) +
-                                "] in SHT_LLVM_CALL_GRAPH type section"),
-                    FileName);
-      return {};
-    }
-
-    uint8_t FlagsVal = Data.getU8(C);
-    if (!C) {
-      reportWarning(
-          createError("failed while reading call graph info's Flags: " +
-                      toString(C.takeError())),
-          FileName);
-      return {};
-    }
-    callgraph::Flags CGFlags = static_cast<callgraph::Flags>(FlagsVal);
-    constexpr uint8_t ValidMask = static_cast<uint8_t>(callgraph::ValidFlags);
-    if ((FlagsVal & ~ValidMask) != 0) {
-      reportWarning(createError("unsupported Flags value [" +
-                                std::to_string(FlagsVal) + "] "),
-                    FileName);
-      return {};
-    }
-
-    uint64_t FuncAddrOffset = C.tell();
-    uint64_t FuncAddr =
-        static_cast<uint64_t>(Data.getUnsigned(C, sizeof(typename ELFT::uint)));
-    if (!C) {
-      reportWarning(
-          createError(
-              "failed while reading call graph info function entry PC: " +
-              toString(C.takeError())),
-          FileName);
-      return {};
-    }
-
-    // Create a new entry for this function.
+  for (const CallGraphRecord &Record : *RecordsOrErr) {
     FunctionCallGraphInfo<ELFT> CGInfo;
-    CGInfo.Entry = {FuncAddrOffset, FuncAddr};
-    CGInfo.FormatVersionNumber = FormatVersionNumber;
-    bool IsIndirectTarget =
-        (CGFlags & callgraph::IsIndirectTarget) != callgraph::None;
-    CGInfo.IsIndirectTarget = IsIndirectTarget;
-    uint64_t TypeID = Data.getU64(C);
-    if (!C) {
-      reportWarning(createError("failed while reading function type ID: " +
-                                toString(C.takeError())),
-                    FileName);
-      return {};
-    }
-    CGInfo.FunctionTypeID = TypeID;
-    if (IsIndirectTarget && TypeID == 0)
+    CGInfo.Entry = {Record.Function.Offset, Record.Function.Value};
+    CGInfo.FormatVersionNumber = Record.Version;
+    CGInfo.IsIndirectTarget = Record.isIndirectTarget();
+    CGInfo.FunctionTypeID = Record.FunctionTypeId;
+    if (CGInfo.IsIndirectTarget && CGInfo.FunctionTypeID == 0)
       ++UnknownCount;
-
-    if (CGFlags & callgraph::HasDirectCallees) {
-      // Read number of direct call sites for this function.
-      uint64_t NumDirectCallees = Data.getULEB128(C);
-      if (!C) {
-        reportWarning(
-            createError("failed while reading number of direct callees: " +
-                        toString(C.takeError())),
-            FileName);
-        return {};
-      }
-      // Read direct callees and populate FuncCGInfos.
-      for (uint64_t I = 0; I < NumDirectCallees; ++I) {
-        uint64_t CalleeOffset = C.tell();
-        uint64_t Callee = static_cast<uint64_t>(
-            Data.getUnsigned(C, sizeof(typename ELFT::uint)));
-        if (!C) {
-          reportWarning(createError("failed while reading direct callee: " +
-                                    toString(C.takeError())),
-                        FileName);
-          return {};
-        }
-        CGInfo.DirectCallees.push_back({CalleeOffset, Callee});
-      }
-    }
-
-    if (CGFlags & callgraph::HasIndirectCallees) {
-      uint64_t NumIndirectTargetTypeIDs = Data.getULEB128(C);
-      if (!C) {
-        reportWarning(
-            createError(
-                "failed while reading number of indirect target type IDs: " +
-                toString(C.takeError())),
-            FileName);
-        return {};
-      }
-      // Read unique indirect target type IDs and populate FuncCGInfos.
-      for (uint64_t I = 0; I < NumIndirectTargetTypeIDs; ++I) {
-        uint64_t TargetType = Data.getU64(C);
-        if (!C) {
-          reportWarning(
-              createError("failed while reading indirect target type ID: " +
-                          toString(C.takeError())),
-              FileName);
-          return {};
-        }
-        CGInfo.IndirectTypeIDs.insert(TargetType);
-      }
-    }
+    for (const CallGraphRecord::AddressField &Callee : Record.DirectCallees)
+      CGInfo.DirectCallees.push_back({Callee.Offset, Callee.Value});
+    CGInfo.IndirectTypeIDs.insert_range(Record.IndirectCalleeTypeIds);
     FuncCGInfos.push_back(std::move(CGInfo));
   }
 

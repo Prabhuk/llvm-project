@@ -586,6 +586,12 @@ public:
   decodeBBAddrMap(const Elf_Shdr &Sec, const Elf_Shdr *RelaSec = nullptr,
                   std::vector<PGOAnalysisMap> *PGOAnalyses = nullptr) const;
 
+  /// Returns the records of the SHT_LLVM_CALL_GRAPH section \p Sec in section
+  /// order. Address fields are returned as stored; in a relocatable file the
+  /// caller resolves them through the relocations at their offsets.
+  Expected<std::vector<CallGraphRecord>>
+  decodeCallGraphSection(const Elf_Shdr &Sec) const;
+
   /// Returns a map from every section matching \p IsMatch to its relocation
   /// section, or \p nullptr if it has no relocation section. This function
   /// returns an error if any of the \p IsMatch calls fail or if it fails to
