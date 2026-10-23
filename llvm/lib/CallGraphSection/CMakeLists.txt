@@ -1,4 +1,5 @@
 add_llvm_component_library(LLVMCallGraphSection
+  CallGraph.cpp
   RecordReader.cpp
 
   ADDITIONAL_HEADER_DIRS

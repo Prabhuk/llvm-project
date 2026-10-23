@@ -1,0 +1,255 @@
+//===- CallGraph.cpp - Reconstructed whole-program call graph -------------===//
+//
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===----------------------------------------------------------------------===//
+
+#include "llvm/CallGraphSection/CallGraph.h"
+#include "llvm/ADT/STLExtras.h"
+#include <utility>
+
+using namespace llvm;
+using namespace llvm::callgraph;
+
+namespace {
+/// Sort and deduplicate in place, giving deterministic output regardless of
+/// the order in which facts were recorded.
+template <typename VectorT> void sortUnique(VectorT &V) {
+  llvm::sort(V);
+  V.erase(llvm::unique(V), V.end());
+}
+} // namespace
+
+NodeId CallGraphBuilder::addFunction(FunctionNode Node) {
+  NodeId Id = static_cast<NodeId>(Nodes.size());
+  Node.Id = Id;
+  Node.Kind = NodeKind::Function;
+  Nodes.push_back(std::move(Node));
+  return Id;
+}
+
+void CallGraphBuilder::addAddressTakenFact(NodeId Target, ModuleId SourceModule,
+                                           bool IsGlobalEscape) {
+  if (IsGlobalEscape)
+    GloballyAddressTaken.insert(Target);
+  else
+    LocallyAddressTaken[SourceModule].insert(Target);
+}
+
+void CallGraphBuilder::addRoot(NodeId N) { Roots.push_back(N); }
+
+CallGraph CallGraphBuilder::build() {
+  CallGraph G;
+  G.Nodes = std::move(Nodes);
+  Nodes.clear();
+  G.NumFunctions = G.Nodes.size();
+
+  // Step 1: whole-program address-taken evidence.
+  for (NodeId N : GloballyAddressTaken)
+    G.Nodes[N].IsAddressTaken = true;
+  for (const auto &ModuleEntry : LocallyAddressTaken)
+    for (NodeId N : ModuleEntry.second)
+      G.Nodes[N].IsAddressTaken = true;
+
+  // Step 2: verify the producer's indirect-target claims against that
+  // evidence, and index the survivors either globally or in each module in
+  // which their address is observable.
+  DenseMap<uint64_t, SmallVector<NodeId, 4>> GlobalTargets;
+  DenseMap<ModuleId, DenseMap<uint64_t, SmallVector<NodeId, 4>>> LocalTargets;
+
+  auto isTypedTarget = [](const FunctionNode &N) {
+    return N.IsExecutable && N.IsIndirectTarget;
+  };
+
+  for (const FunctionNode &N : G.Nodes) {
+    // An external function is marked as an indirect target by every producer
+    // that cannot see the whole program, so the claim alone is not evidence.
+    if (isTypedTarget(N) && GloballyAddressTaken.contains(N.Id))
+      for (uint64_t TypeId : N.TypeIds)
+        if (TypeId != 0)
+          GlobalTargets[TypeId].push_back(N.Id);
+  }
+  for (const auto &ModuleEntry : LocallyAddressTaken)
+    for (NodeId N : ModuleEntry.second)
+      if (isTypedTarget(G.Nodes[N]) && !GloballyAddressTaken.contains(N))
+        for (uint64_t TypeId : G.Nodes[N].TypeIds)
+          if (TypeId != 0)
+            LocalTargets[ModuleEntry.first][TypeId].push_back(N);
+
+  for (auto &Entry : GlobalTargets)
+    sortUnique(Entry.second);
+  for (auto &ModuleEntry : LocalTargets)
+    for (auto &Entry : ModuleEntry.second)
+      sortUnique(Entry.second);
+
+  // Address-taken functions, and the subset that no indirect call site can
+  // exclude by type: those without a complete record, not claimed as an
+  // indirect target, or with an unknown type ID.
+  SmallVector<NodeId, 0> AddressTaken, UntypedAddressTaken;
+  for (const FunctionNode &N : G.Nodes) {
+    if (!N.IsExecutable || !N.IsAddressTaken)
+      continue;
+    AddressTaken.push_back(N.Id);
+    if (!N.HasRecord || !N.IsIndirectTarget || N.TypeIds.empty() ||
+        N.HasUnknownTypeId)
+      UntypedAddressTaken.push_back(N.Id);
+  }
+
+  // Step 3: resolve each indirect call site to its candidate set. The set is
+  // determined by the signature and, only if the caller's module has
+  // module-local candidates for it, by that module; it is computed once per
+  // such key and shared by all sites. Ranges are recorded first and turned
+  // into ArrayRefs afterwards, once the pool has stopped growing.
+  struct SetRange {
+    uint32_t Begin;
+    uint32_t Size;
+  };
+  std::vector<SetRange> Sets;
+  DenseMap<std::pair<uint64_t, ModuleId>, uint32_t> SetIndex;
+  constexpr uint32_t NoSet = ~uint32_t(0);
+
+  struct SiteRange {
+    uint64_t TypeId;
+    uint32_t Set;
+  };
+  std::vector<SiteRange> SiteRanges;
+
+  for (FunctionNode &N : G.Nodes) {
+    sortUnique(N.DirectCallees);
+    sortUnique(N.IndirectCalleeTypeIds);
+
+    N.FirstSite = static_cast<uint32_t>(SiteRanges.size());
+    N.NumSites = 0;
+
+    auto ModuleIt = LocalTargets.find(N.Module);
+    for (uint64_t TypeId : N.IndirectCalleeTypeIds) {
+      ++N.NumSites;
+      auto GlobalIt = GlobalTargets.find(TypeId);
+      const SmallVector<NodeId, 4> *Global =
+          GlobalIt != GlobalTargets.end() ? &GlobalIt->second : nullptr;
+      const SmallVector<NodeId, 4> *Local = nullptr;
+      if (ModuleIt != LocalTargets.end()) {
+        auto LocalIt = ModuleIt->second.find(TypeId);
+        if (LocalIt != ModuleIt->second.end())
+          Local = &LocalIt->second;
+      }
+
+      // A site with no candidates is still recorded: "calls this signature,
+      // targets unknown" is meaningful to consumers such as a stack-depth
+      // estimator, which must treat it as unbounded.
+      if (!Global && !Local) {
+        SiteRanges.push_back({TypeId, NoSet});
+        continue;
+      }
+
+      auto [It, Inserted] =
+          SetIndex.try_emplace({TypeId, Local ? N.Module : InvalidModuleId},
+                               static_cast<uint32_t>(Sets.size()));
+      if (Inserted) {
+        uint32_t Begin = static_cast<uint32_t>(G.TargetPool.size());
+        if (Global)
+          G.TargetPool.insert(G.TargetPool.end(), Global->begin(),
+                              Global->end());
+        if (Local)
+          G.TargetPool.insert(G.TargetPool.end(), Local->begin(), Local->end());
+        auto Candidates =
+            MutableArrayRef<NodeId>(G.TargetPool).drop_front(Begin);
+        llvm::sort(Candidates);
+        size_t Size = llvm::unique(Candidates) - Candidates.begin();
+        G.TargetPool.resize(Begin + Size);
+        Sets.push_back({Begin, static_cast<uint32_t>(Size)});
+      }
+      SiteRanges.push_back({TypeId, It->second});
+    }
+  }
+
+  // Step 4: pseudo nodes. TargetSet nodes follow the fixed ones in order of
+  // first use, which is deterministic.
+  auto addPseudo = [&](NodeKind Kind) {
+    FunctionNode P;
+    P.Id = static_cast<NodeId>(G.Nodes.size());
+    P.Kind = Kind;
+    P.IsExecutable = false;
+    P.HasRecord = true;
+    G.Nodes.push_back(std::move(P));
+  };
+  addPseudo(NodeKind::ExternalCalling);
+  addPseudo(NodeKind::UnknownCallee);
+  addPseudo(NodeKind::UntypedTargets);
+  const NodeId FirstSetNode = static_cast<NodeId>(G.Nodes.size());
+  for (const SetRange &S : Sets) {
+    addPseudo(NodeKind::TargetSet);
+    ArrayRef<NodeId> Targets =
+        ArrayRef<NodeId>(G.TargetPool).slice(S.Begin, S.Size);
+    G.Nodes.back().Callees.assign(Targets.begin(), Targets.end());
+  }
+
+  G.Sites.reserve(SiteRanges.size());
+  for (const SiteRange &R : SiteRanges) {
+    if (R.Set == NoSet) {
+      G.Sites.push_back(IndirectCallSite{R.TypeId, {}, InvalidNodeId});
+      continue;
+    }
+    const SetRange &S = Sets[R.Set];
+    G.Sites.push_back(IndirectCallSite{
+        R.TypeId, ArrayRef<NodeId>(G.TargetPool).slice(S.Begin, S.Size),
+        FirstSetNode + R.Set});
+  }
+
+  const NodeId UnknownCallee = G.unknownCalleeNode();
+  const NodeId UntypedTargets = G.untypedTargetsNode();
+
+  // Step 5: adjacency and its inverse. Self-edges are kept so that recursion
+  // is visible.
+  for (NodeId Id = 0; Id != G.NumFunctions; ++Id) {
+    FunctionNode &N = G.Nodes[Id];
+    SmallVector<NodeId, 8> All(N.DirectCallees.begin(), N.DirectCallees.end());
+    All.append(N.JumpTargets.begin(), N.JumpTargets.end());
+    for (const IndirectCallSite &Site : G.indirectCallSites(N.Id))
+      if (Site.TargetSetNode != InvalidNodeId)
+        All.push_back(Site.TargetSetNode);
+    if (N.IsExecutable) {
+      // Any indirect call may reach a function that cannot be excluded by
+      // type.
+      if (N.NumSites != 0 && !UntypedAddressTaken.empty())
+        All.push_back(UntypedTargets);
+      // A function without a record may do anything; so may one that calls
+      // code outside the graph.
+      if (!N.HasRecord || N.CallsUnknown)
+        All.push_back(UnknownCallee);
+    }
+    sortUnique(All);
+    N.Callees.assign(All.begin(), All.end());
+  }
+
+  if (UnknownCodeIsRoot)
+    Roots.push_back(UnknownCallee);
+  sortUnique(Roots);
+  G.Nodes[G.externalCallingNode()].Callees.assign(Roots.begin(), Roots.end());
+  G.Nodes[UnknownCallee].Callees.assign(AddressTaken.begin(),
+                                        AddressTaken.end());
+  G.Nodes[UntypedTargets].Callees.assign(UntypedAddressTaken.begin(),
+                                         UntypedAddressTaken.end());
+
+  // Callers come out sorted because nodes are visited in increasing order.
+  for (const FunctionNode &N : G.Nodes)
+    for (NodeId Callee : N.Callees)
+      G.Nodes[Callee].Callers.push_back(N.Id);
+
+  // Coverage summary.
+  CoverageSummary &C = G.Coverage;
+  C.NumFunctions = G.NumFunctions;
+  for (const FunctionNode &N : G.functions()) {
+    if (!N.IsExecutable)
+      continue;
+    ++(N.HasRecord ? C.NumWithRecord : C.NumWithoutRecord);
+    if (!N.HasRecord || N.CallsUnknown)
+      ++C.NumCallingUnknown;
+  }
+  C.NumAddressTaken = AddressTaken.size();
+  C.NumUntypedAddressTaken = UntypedAddressTaken.size();
+
+  return G;
+}
