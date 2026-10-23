@@ -66,6 +66,57 @@ struct EntryPoint {
 Expected<std::vector<EntryPoint>>
 resolveEntryPoints(const StackSizeGraph &G, ArrayRef<std::string> Specs);
 
+/// One term of a stack usage expression: a number of bytes plus the unknowns
+/// along one kind of path, such as 80 + calls(<external>).
+struct StackUsageTerm {
+  uint64_t Constant = 0;
+  /// Indexes into StackSizeEstimator::unknowns(), sorted and unique.
+  SmallVector<unsigned, 2> Unknowns;
+};
+
+/// The stack usage of an entry point as an expression in which the unknowns
+/// stay as terms. Every path from the entry point contributes a term, those
+/// that cannot be the largest for any value of the unknowns are dropped, and
+/// the expression is the maximum of the rest.
+struct StackUsageExpression {
+  /// In decreasing order of constant. The first term is the max stack usage
+  /// with every unknown at zero, and an exact estimate is that one term.
+  SmallVector<StackUsageTerm, 2> Terms;
+};
+
+/// A quantity that an estimate could not see, named in an expression by what
+/// is unknown, so that every path that reaches the same unknown quantity
+/// shares the same term.
+struct Unknown {
+  enum class Kind {
+    /// The frame of a function without a frame size: frame(f).
+    Frame,
+    /// The stack beyond a function without call graph information, that is
+    /// its callees, and its own frame when that is unknown too: calls(f).
+    Calls,
+    /// The further invocations of a recursive component: cycle(f, g).
+    Cycle,
+    /// The stack beyond an indirect call whose targets are not all known:
+    /// indirect(type 0x1234) when no function has the type of the call, and
+    /// indirect(unknown type) for the indirect call targets of unknown type
+    /// in the file, which any indirect call may reach.
+    Indirect,
+  };
+  Kind K;
+  /// The function, for Frame and Calls.
+  const Function *F = nullptr;
+  /// The component, as an index into StackSizeEstimator::cycles(), for Cycle.
+  unsigned Cycle = 0;
+  /// The type ID of the call, for Indirect, with 0 standing for unknown type
+  /// as in the call graph section.
+  uint64_t TypeId = 0;
+};
+
+/// Formats \p Terms as "max(term, ...)", or as the term itself when there is
+/// one, with \p Names the name of each unknown by index.
+std::string formatStackUsageExpression(ArrayRef<StackUsageTerm> Terms,
+                                       ArrayRef<std::string> Names);
+
 /// An uninstrumented callee: a function without a call graph record, whose
 /// own callees are therefore unknown, with the functions that call it.
 struct UninstrumentedCallee {
@@ -99,6 +150,9 @@ struct Estimate {
 
   /// Whether MaxStackUsage is only a lower bound, for the reasons below.
   bool IsLowerBound = false;
+
+  /// The stack usage with the unknowns kept as terms.
+  StackUsageExpression Expression;
 
   /// Reachable recursive components, as indexes into
   /// StackSizeEstimator::cycles(), in increasing order.
@@ -147,6 +201,19 @@ public:
   /// order, ordered by their first member.
   ArrayRef<ArrayRef<const Function *>> cycles() const { return Cycles; }
 
+  /// The unknowns of the expressions, by index.
+  ArrayRef<Unknown> unknowns() const { return Unknowns; }
+
+  /// The names of the unknowns, by index: frame(f), calls(f), cycle(f, g)
+  /// naming at most three members, indirect(type 0x1234) or
+  /// indirect(unknown type).
+  ArrayRef<std::string> unknownNames() const { return UnknownNames; }
+
+  /// Formats \p E for a report, as "max(80, 16 + calls(<external>))".
+  std::string formatExpression(const StackUsageExpression &E) const {
+    return formatStackUsageExpression(E.Terms, UnknownNames);
+  }
+
   Estimate estimate(const EntryPoint &Entry) const;
 
 private:
@@ -163,13 +230,23 @@ private:
     /// The largest usage of a path starting in this component.
     uint64_t MaxUsage = 0;
     std::optional<unsigned> NextOnMaxPath;
+    /// The usage of the paths starting in this component.
+    StackUsageExpression Expression;
   };
+
+  unsigned internUnknown(const Unknown &U);
+  void computeTerms(Component &C);
 
   const StackSizeGraph &G;
   EstimatorOptions Opts;
   std::vector<Component> Components;
   DenseMap<const Function *, unsigned> ComponentOf;
   std::vector<ArrayRef<const Function *>> Cycles;
+  std::vector<Unknown> Unknowns;
+  std::vector<std::string> UnknownNames;
+  /// The index of each unknown by its kind and its function address, cycle
+  /// or type ID.
+  DenseMap<std::pair<unsigned, uint64_t>, unsigned> UnknownIds;
   /// The callers of every function without a call graph record, so that an
   /// estimate finds them without scanning everything it reaches.
   DenseMap<const Function *, SmallVector<const Function *, 2>>

@@ -14,6 +14,7 @@
 #      NO-SECTION:{{.*}}warning: '[[FILE]]': no SHT_LLVM_CALL_GRAPH section found; compile with -fexperimental-call-graph-section to get call graph information
 #      NO-SECTION:Entry point: main (0x1000)
 # NO-SECTION-NEXT:  Stack usage: at least 16 bytes (lower bound)
+# NO-SECTION-NEXT:  Stack usage expression: 16 + calls(main)
 # NO-SECTION-NEXT:  Lower bound because:
 # NO-SECTION-NEXT:    unknown callees: main (0x1000)
 # NO-SECTION-NEXT:  Max stack path:

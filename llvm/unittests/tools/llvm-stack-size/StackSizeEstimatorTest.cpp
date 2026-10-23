@@ -84,6 +84,15 @@ Estimate estimateFrom(const StackSizeGraph &G, const Function &Entry,
       {const_cast<Function *>(&Entry), Entry.getDisplayName()});
 }
 
+std::string expressionOf(const StackSizeGraph &G, const Function &Entry,
+                         EstimatorOptions Opts = {}) {
+  StackSizeEstimator Estimator(G, Opts);
+  return Estimator.formatExpression(
+      Estimator
+          .estimate({const_cast<Function *>(&Entry), Entry.getDisplayName()})
+          .Expression);
+}
+
 TEST(StackSizeEstimatorTest, DiamondTakesTheDeepestPath) {
   GraphBuilder B;
   Function &Main = B.add(0x1000, "main", 16);
@@ -275,6 +284,123 @@ TEST(StackSizeEstimatorTest, UnknownIndirectTargetsCountTheReturnAddress) {
   EXPECT_TRUE(E.IsLowerBound);
   EXPECT_EQ(E.MaxStackUsage, 32u);
   EXPECT_THAT(names(E.MaxStackPath), ElementsAre("main"));
+  EXPECT_EQ(expressionOf(G, Main, Opts), "32 + indirect(type 0xbb)");
+}
+
+TEST(StackSizeEstimatorTest, ExpressionsKeepUnknownsAsTerms) {
+  // main calls leaf and an external function; helper calls external through
+  // two paths; rec calls itself and vla, which has no frame size.
+  GraphBuilder B;
+  Function &Main = B.add(0x1000, "main", 16);
+  Function &Leaf = B.add(0x2000, "leaf", 64);
+  Function &External = B.addUninstrumented(0, "");
+  Function &Helper = B.add(0x1100, "helper", 16);
+  Function &A = B.add(0x2100, "a", 64);
+  Function &Bf = B.add(0x2200, "b", 32);
+  Function &Rec = B.add(0x1200, "rec", 8);
+  Function &Vla = B.add(0x2300, "vla", std::nullopt);
+  B.call(Main, Leaf);
+  B.call(Main, External);
+  B.call(Helper, A);
+  B.call(Helper, Bf);
+  B.call(A, External);
+  B.call(Bf, External);
+  B.call(Rec, Rec);
+  B.call(Rec, Vla);
+  StackSizeGraph G = B.finish();
+
+  // An exact estimate is a number.
+  EXPECT_EQ(expressionOf(G, Leaf), "64");
+  // Incomparable paths both stay.
+  EXPECT_EQ(expressionOf(G, Main), "max(80, 16 + calls(<external>))");
+  // A path dominated by another with the same unknowns is dropped.
+  EXPECT_EQ(expressionOf(G, Helper), "80 + calls(<external>)");
+  // Unknowns are sorted and never repeated.
+  EXPECT_EQ(expressionOf(G, Rec), "8 + cycle(rec) + frame(vla)");
+
+  // The terms refer to the unknowns of the estimator.
+  StackSizeEstimator Estimator(G, {});
+  Estimate R = Estimator.estimate({&Rec, "rec"});
+  ASSERT_EQ(R.Expression.Terms.size(), 1u);
+  EXPECT_EQ(R.Expression.Terms[0].Constant, 8u);
+  ASSERT_EQ(R.Expression.Terms[0].Unknowns.size(), 2u);
+  std::vector<Unknown::Kind> Kinds;
+  for (unsigned Id : R.Expression.Terms[0].Unknowns) {
+    const Unknown &U = Estimator.unknowns()[Id];
+    Kinds.push_back(U.K);
+    if (U.K == Unknown::Kind::Frame)
+      EXPECT_EQ(U.F, &Vla);
+    else
+      EXPECT_THAT(names(Estimator.cycles()[U.Cycle]), ElementsAre("rec"));
+  }
+  EXPECT_THAT(Kinds, testing::UnorderedElementsAre(Unknown::Kind::Frame,
+                                                   Unknown::Kind::Cycle));
+}
+
+TEST(StackSizeEstimatorTest, UnknownsAreNamedByWhatIsUnknown) {
+  // Two functions make indirect calls of the same unresolved type, and two
+  // make calls that may reach the untyped target, so each of those is one
+  // unknown. A cycle of four names three members.
+  GraphBuilder B;
+  Function &Main = B.add(0x1000, "main", 16);
+  Function &P = B.add(0x2000, "p", 32);
+  Function &Q = B.add(0x3000, "q", 32);
+  Function &R = B.add(0x4000, "r", 8);
+  Function &S = B.add(0x5000, "s", 8);
+  Function &Typed = B.add(0x6000, "typed", 0);
+  Function &Untyped = B.add(0x7000, "untyped", 0);
+  Typed.IsIndirectTarget = true;
+  Typed.TypeIds.push_back(0xaa);
+  Untyped.IsIndirectTarget = true;
+  Untyped.HasUnknownTypeId = true;
+  B.call(Main, P);
+  B.call(Main, Q);
+  B.call(Main, R);
+  B.call(Main, S);
+  P.UnresolvedIndirectTypeIds.push_back(0xbb);
+  Q.UnresolvedIndirectTypeIds.push_back(0xbb);
+  B.callIndirect(R, 0xaa, {&Typed});
+  B.callIndirect(S, 0xaa, {&Typed});
+  StackSizeGraph G = B.finish();
+
+  EstimatorOptions Opts;
+  Opts.CallFrameOverhead = 8;
+  EXPECT_EQ(expressionOf(G, Main, Opts),
+            "max(72 + indirect(type 0xbb), 48 + indirect(unknown type))");
+
+  GraphBuilder C;
+  Function &A1 = C.add(0x1000, "a1", 8);
+  Function &A2 = C.add(0x2000, "a2", 8);
+  Function &A3 = C.add(0x3000, "a3", 8);
+  Function &A4 = C.add(0x4000, "a4", 8);
+  C.call(A1, A2);
+  C.call(A2, A3);
+  C.call(A3, A4);
+  C.call(A4, A1);
+  StackSizeGraph G2 = C.finish();
+  EXPECT_EQ(expressionOf(G2, A1), "32 + cycle(a1, a2, a3 and 1 more)");
+}
+
+TEST(StackSizeEstimatorTest, IndirectCallsWithUnknownTargetsAreABranch) {
+  GraphBuilder B;
+  Function &Main = B.add(0x1000, "main", 16);
+  Function &Leaf = B.add(0x2000, "leaf", 64);
+  B.call(Main, Leaf);
+  Main.UnresolvedIndirectTypeIds.push_back(0xbb);
+  StackSizeGraph G = B.finish();
+
+  EstimatorOptions Opts;
+  Opts.CallFrameOverhead = 8;
+  EXPECT_EQ(expressionOf(G, Main, Opts), "max(96, 32 + indirect(type 0xbb))");
+}
+
+TEST(StackSizeEstimatorTest, FormatStackUsageExpression) {
+  std::string Names[] = {"calls(f)", "frame(g)"};
+  EXPECT_EQ(formatStackUsageExpression({{48, {}}}, Names), "48");
+  EXPECT_EQ(formatStackUsageExpression({{0, {}}}, Names), "0");
+  EXPECT_EQ(formatStackUsageExpression({{0, {0}}}, Names), "calls(f)");
+  EXPECT_EQ(formatStackUsageExpression({{64, {}}, {32, {0, 1}}}, Names),
+            "max(64, 32 + calls(f) + frame(g))");
 }
 
 TEST(StackSizeEstimatorTest, FrameSumsSaturate) {

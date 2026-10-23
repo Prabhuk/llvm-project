@@ -1,0 +1,121 @@
+## The stack usage expression keeps the unknowns as terms. Every path
+## contributes a term, a path whose usage can never exceed another's for any
+## value of the unknowns is dropped, and the rest form the maximum.
+
+# RUN: yaml2obj %s -o %t
+# RUN: llvm-stack-size %t --entry-point=branches | FileCheck %s --check-prefix=BRANCHES --match-full-lines
+# RUN: llvm-stack-size %t --entry-point=all_external | FileCheck %s --check-prefix=ALL-EXTERNAL --match-full-lines
+# RUN: llvm-stack-size %t --entry-point=indirect --call-frame-overhead=8 | FileCheck %s --check-prefix=INDIRECT --match-full-lines
+
+## The known path through leaf and the unknown path through the external
+## callee are incomparable, so both stay.
+#      BRANCHES:Entry point: branches (0x1000)
+# BRANCHES-NEXT:  Stack usage: at least 80 bytes (lower bound)
+# BRANCHES-NEXT:  Stack usage expression: max(80, 16 + calls(<external>))
+
+## Both paths reach the external callee, so the shallower one is dropped and
+## the unknown is counted once.
+#      ALL-EXTERNAL:Entry point: all_external (0x1100)
+# ALL-EXTERNAL-NEXT:  Stack usage: at least 80 bytes (lower bound)
+# ALL-EXTERNAL-NEXT:  Stack usage expression: 80 + calls(<external>)
+
+## An indirect call with unknown targets is a path of its own, and the call
+## into it costs the call frame overhead.
+#      INDIRECT:Entry point: indirect (0x1200)
+# INDIRECT-NEXT:  Stack usage: at least 96 bytes (lower bound)
+# INDIRECT-NEXT:  Stack usage expression: max(96, 32 + indirect(type 0xbbb))
+
+--- !ELF
+FileHeader:
+  Class:   ELFCLASS64
+  Data:    ELFDATA2LSB
+  Type:    ET_EXEC
+  Machine: EM_AARCH64
+Sections:
+  - Name:    .text
+    Type:    SHT_PROGBITS
+    Flags:   [ SHF_ALLOC, SHF_EXECINSTR ]
+    Address: 0x1000
+    Size:    0x10000
+  - Name: .stack_sizes
+    Type: SHT_PROGBITS
+    Entries:
+      - Address: 0x1000
+        Size:    16
+      - Address: 0x2000
+        Size:    64
+      - Address: 0x1100
+        Size:    16
+      - Address: 0x2100
+        Size:    64
+      - Address: 0x2200
+        Size:    32
+      - Address: 0x1200
+        Size:    16
+  - Name: .llvm.callgraph
+    Type: SHT_LLVM_CALL_GRAPH
+    ContentArray: [
+      0x00,                                           ## Version
+      0x02,                                           ## Flags
+      0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Function 0x1000
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Type ID 0x0
+      0x02,                                           ## 2 direct callees
+      0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Callee 0x2000
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Callee 0x0
+      0x00,                                           ## Version
+      0x00,                                           ## Flags
+      0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Function 0x2000
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Type ID 0x0
+      0x00,                                           ## Version
+      0x02,                                           ## Flags
+      0x00, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Function 0x1100
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Type ID 0x0
+      0x02,                                           ## 2 direct callees
+      0x00, 0x21, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Callee 0x2100
+      0x00, 0x22, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Callee 0x2200
+      0x00,                                           ## Version
+      0x02,                                           ## Flags
+      0x00, 0x21, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Function 0x2100
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Type ID 0x0
+      0x01,                                           ## 1 direct callees
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Callee 0x0
+      0x00,                                           ## Version
+      0x02,                                           ## Flags
+      0x00, 0x22, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Function 0x2200
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Type ID 0x0
+      0x01,                                           ## 1 direct callees
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Callee 0x0
+      0x00,                                           ## Version
+      0x06,                                           ## Flags
+      0x00, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Function 0x1200
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Type ID 0x0
+      0x01,                                           ## 1 direct callees
+      0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Callee 0x2000
+      0x01,                                           ## 1 indirect type IDs
+      0xbb, 0x0b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Type ID 0xbbb
+    ]
+Symbols:
+  - Name:    branches
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x1000
+  - Name:    leaf
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x2000
+  - Name:    all_external
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x1100
+  - Name:    a
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x2100
+  - Name:    b
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x2200
+  - Name:    indirect
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x1200

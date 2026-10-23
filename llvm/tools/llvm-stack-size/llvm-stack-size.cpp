@@ -128,6 +128,28 @@ void printPath(raw_ostream &OS, const StackSizeEstimator &Estimator,
   }
 }
 
+/// The text report prints an expression that names at most this many
+/// unknowns, counting repetitions across its terms, since a longer one is not
+/// readable; beyond it the report gives the size of the expression instead.
+constexpr size_t MaxPrintedUnknowns = 64;
+
+void printExpression(raw_ostream &OS, const StackSizeEstimator &Estimator,
+                     const StackUsageExpression &Expression) {
+  size_t Named = 0;
+  SmallDenseSet<unsigned, 16> Distinct;
+  for (const StackUsageTerm &T : Expression.Terms) {
+    Named += T.Unknowns.size();
+    Distinct.insert_range(T.Unknowns);
+  }
+  if (Named <= MaxPrintedUnknowns) {
+    OS << Estimator.formatExpression(Expression);
+    return;
+  }
+  OS << Expression.Terms.size()
+     << (Expression.Terms.size() == 1 ? " term over " : " terms over ")
+     << Distinct.size() << " unknowns, too large to print";
+}
+
 void printLowerBoundReasons(raw_ostream &OS,
                             const StackSizeEstimator &Estimator,
                             const Estimate &E, StringRef Indent) {
@@ -180,6 +202,9 @@ void printEstimate(raw_ostream &OS, const StackSizeEstimator &Estimator,
   OS << "\n";
 
   if (E.IsLowerBound) {
+    OS << "  Stack usage expression: ";
+    printExpression(OS, Estimator, E.Expression);
+    OS << "\n";
     OS << "  Lower bound because:\n";
     printLowerBoundReasons(OS, Estimator, E, "    ");
   }

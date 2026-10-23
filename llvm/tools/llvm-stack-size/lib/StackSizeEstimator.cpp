@@ -9,12 +9,15 @@
 #include "StackSizeEstimator.h"
 #include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/Hashing.h"
 #include "llvm/ADT/SCCIterator.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SetVector.h"
+#include "llvm/ADT/StringExtras.h"
 #include "llvm/BinaryFormat/ELF.h"
 #include "llvm/Support/GlobPattern.h"
 #include "llvm/Support/MathExtras.h"
+#include <algorithm>
 
 using namespace llvm;
 using namespace llvm::stacksize;
@@ -173,6 +176,11 @@ StackSizeEstimator::StackSizeEstimator(const StackSizeGraph &G,
     Cycles.push_back(Components[Index].Members);
   }
 
+  // The expressions name the cycles, so they come after the numbering. The
+  // component order still puts every component before its callers.
+  for (Component &C : Components)
+    computeTerms(C);
+
   for (const Function *F : G.functions())
     for (const Function *Callee : F->Callees)
       if (!Callee->HasRecord)
@@ -183,6 +191,191 @@ bool StackSizeEstimator::callsUnknownTargets(const Function &F) const {
   return !F.UnresolvedIndirectTypeIds.empty() ||
          (!F.IndirectCalls.empty() &&
           !G.getUnknownTypeIndirectTargets().empty());
+}
+
+std::string
+stacksize::formatStackUsageExpression(ArrayRef<StackUsageTerm> Terms,
+                                      ArrayRef<std::string> Names) {
+  // The text orders the unknowns of a term, and the terms of one constant,
+  // by name, so that it does not depend on the numbering of the unknowns.
+  struct NamedTerm {
+    uint64_t Constant;
+    SmallVector<StringRef, 4> Unknowns;
+  };
+  SmallVector<NamedTerm, 4> Named;
+  for (const StackUsageTerm &T : Terms) {
+    NamedTerm N{T.Constant, {}};
+    for (unsigned Id : T.Unknowns)
+      N.Unknowns.push_back(Names[Id]);
+    llvm::sort(N.Unknowns);
+    Named.push_back(std::move(N));
+  }
+  llvm::stable_sort(Named, [](const NamedTerm &A, const NamedTerm &B) {
+    if (A.Constant != B.Constant)
+      return A.Constant > B.Constant;
+    return A.Unknowns < B.Unknowns;
+  });
+
+  SmallVector<std::string, 4> Formatted;
+  for (const NamedTerm &T : Named) {
+    SmallVector<StringRef, 4> Parts;
+    std::string Constant = utostr(T.Constant);
+    if (T.Constant != 0 || T.Unknowns.empty())
+      Parts.push_back(Constant);
+    Parts.append(T.Unknowns);
+    Formatted.push_back(join(Parts, " + "));
+  }
+  if (Formatted.size() == 1)
+    return Formatted.front();
+  return "max(" + join(Formatted, ", ") + ")";
+}
+
+/// At most this many members are named in cycle(...).
+static constexpr size_t MaxNamedCycleMembers = 3;
+
+unsigned StackSizeEstimator::internUnknown(const Unknown &U) {
+  uint64_t Key;
+  switch (U.K) {
+  case Unknown::Kind::Frame:
+  case Unknown::Kind::Calls:
+    Key = U.F->Address;
+    break;
+  case Unknown::Kind::Cycle:
+    Key = U.Cycle;
+    break;
+  case Unknown::Kind::Indirect:
+    Key = U.TypeId;
+    break;
+  }
+  auto [It, Inserted] =
+      UnknownIds.try_emplace({unsigned(U.K), Key}, Unknowns.size());
+  if (!Inserted)
+    return It->second;
+
+  std::string Name;
+  switch (U.K) {
+  case Unknown::Kind::Frame:
+    Name = "frame(" + U.F->getDisplayName() + ")";
+    break;
+  case Unknown::Kind::Calls:
+    Name = "calls(" + U.F->getDisplayName() + ")";
+    break;
+  case Unknown::Kind::Cycle: {
+    SmallVector<std::string, 4> Members;
+    for (const Function *F : Cycles[U.Cycle])
+      Members.push_back(F->getDisplayName());
+    llvm::sort(Members);
+    Name = "cycle(" +
+           join(ArrayRef(Members).take_front(MaxNamedCycleMembers), ", ");
+    if (Members.size() > MaxNamedCycleMembers)
+      Name += " and " + utostr(Members.size() - MaxNamedCycleMembers) + " more";
+    Name += ")";
+    break;
+  }
+  case Unknown::Kind::Indirect:
+    Name = U.TypeId == 0 ? "indirect(unknown type)"
+                         : "indirect(type 0x" + utohexstr(U.TypeId, true) + ")";
+    break;
+  }
+  Unknowns.push_back(U);
+  UnknownNames.push_back(std::move(Name));
+  return Unknowns.size() - 1;
+}
+
+/// Returns the sorted union of two sorted, unique lists.
+static SmallVector<unsigned, 2> unite(ArrayRef<unsigned> A,
+                                      ArrayRef<unsigned> B) {
+  SmallVector<unsigned, 2> Union;
+  Union.reserve(A.size() + B.size());
+  std::set_union(A.begin(), A.end(), B.begin(), B.end(),
+                 std::back_inserter(Union));
+  return Union;
+}
+
+void StackSizeEstimator::computeTerms(Component &C) {
+  // The unknowns of the component itself apply to every path through it.
+  SmallVector<unsigned, 2> Local;
+  if (C.Cycle)
+    Local.push_back(internUnknown({Unknown::Kind::Cycle, nullptr, *C.Cycle}));
+  for (const Function *F : C.Members) {
+    if (!F->HasRecord)
+      Local.push_back(internUnknown({Unknown::Kind::Calls, F}));
+    else if (!F->FrameSize)
+      Local.push_back(internUnknown({Unknown::Kind::Frame, F}));
+  }
+  llvm::sort(Local);
+  Local.erase(llvm::unique(Local), Local.end());
+
+  // A path either ends in this component, continues into a component it
+  // calls, or continues into the unknown targets of an indirect call. The
+  // unknown targets are named by their type, so that every call of a type
+  // reaches the same unknown.
+  SmallVector<StackUsageTerm, 4> Candidates;
+  auto AddCandidate = [&](uint64_t Constant, ArrayRef<unsigned> Unknowns) {
+    StackUsageTerm T;
+    T.Constant = SaturatingAdd(C.LocalUsage, Constant);
+    T.Unknowns = unite(Local, Unknowns);
+    Candidates.push_back(std::move(T));
+  };
+  AddCandidate(0, {});
+  for (unsigned S : C.Successors)
+    for (const StackUsageTerm &T : Components[S].Expression.Terms)
+      AddCandidate(T.Constant, T.Unknowns);
+  bool HasUntypedTargets = !G.getUnknownTypeIndirectTargets().empty();
+  for (const Function *F : C.Members) {
+    for (uint64_t TypeId : F->UnresolvedIndirectTypeIds)
+      AddCandidate(
+          Opts.CallFrameOverhead,
+          internUnknown({Unknown::Kind::Indirect, nullptr, 0, TypeId}));
+    if (HasUntypedTargets && !F->IndirectCalls.empty())
+      AddCandidate(Opts.CallFrameOverhead,
+                   internUnknown({Unknown::Kind::Indirect, nullptr, 0, 0}));
+  }
+
+  // Keep the largest constant for each set of unknowns.
+  DenseMap<hash_code, unsigned> ByUnknowns;
+  SmallVector<StackUsageTerm, 4> Unique;
+  for (StackUsageTerm &T : Candidates) {
+    hash_code H = hash_combine_range(T.Unknowns.begin(), T.Unknowns.end());
+    auto [It, Inserted] = ByUnknowns.try_emplace(H, Unique.size());
+    if (Inserted || Unique[It->second].Unknowns != T.Unknowns) {
+      // A new set, or a hash collision between different sets, which the
+      // dominance pass below still tells apart.
+      Unique.push_back(std::move(T));
+      continue;
+    }
+    StackUsageTerm &Same = Unique[It->second];
+    Same.Constant = std::max(Same.Constant, T.Constant);
+  }
+
+  // Drop every term that another term dominates: for non-negative unknowns,
+  // (c1, U1) is at least (c2, U2) whenever c1 >= c2 and U2 is a subset of U1.
+  // In order of decreasing constant, and of decreasing size among equal
+  // constants, a dominating term always comes first, and dominance is
+  // transitive, so a term only needs to be checked against the terms kept
+  // before it.
+  llvm::stable_sort(Unique,
+                    [](const StackUsageTerm &A, const StackUsageTerm &B) {
+                      if (A.Constant != B.Constant)
+                        return A.Constant > B.Constant;
+                      return A.Unknowns.size() > B.Unknowns.size();
+                    });
+  auto Dominates = [](const StackUsageTerm &A, const StackUsageTerm &B) {
+    return A.Constant >= B.Constant &&
+           std::includes(A.Unknowns.begin(), A.Unknowns.end(),
+                         B.Unknowns.begin(), B.Unknowns.end());
+  };
+  SmallVectorImpl<StackUsageTerm> &Terms = C.Expression.Terms;
+  for (StackUsageTerm &T : Unique)
+    if (llvm::none_of(Terms, [&](const StackUsageTerm &Kept) {
+          return Dominates(Kept, T);
+        }))
+      Terms.push_back(std::move(T));
+  llvm::sort(Terms, [&](const StackUsageTerm &A, const StackUsageTerm &B) {
+    if (A.Constant != B.Constant)
+      return A.Constant > B.Constant;
+    return A.Unknowns < B.Unknowns;
+  });
 }
 
 uint64_t StackSizeEstimator::getFrameUsage(const Function &F) const {
@@ -199,6 +392,7 @@ Estimate StackSizeEstimator::estimate(const EntryPoint &Entry) const {
   E.Entry = Entry;
   unsigned StartIndex = ComponentOf.lookup(Entry.F);
   E.MaxStackUsage = Components[StartIndex].MaxUsage;
+  E.Expression = Components[StartIndex].Expression;
 
   for (std::optional<unsigned> Index = StartIndex; Index;
        Index = Components[*Index].NextOnMaxPath) {

@@ -12,6 +12,7 @@
 ## sized frame.
 #      FRAME:Entry point: unknown_frame (0x1000)
 # FRAME-NEXT:  Stack usage: at least 16 bytes (lower bound)
+# FRAME-NEXT:  Stack usage expression: 16 + frame(vla)
 # FRAME-NEXT:  Lower bound because:
 # FRAME-NEXT:    unknown frame size: vla (0x2000)
 # FRAME-NEXT:  Max stack path:
@@ -21,6 +22,7 @@
 ## A call to another module resolves to address 0 in a linked file.
 #      EXTERNAL:Entry point: external (0x1100)
 # EXTERNAL-NEXT:  Stack usage: at least 16 bytes (lower bound)
+# EXTERNAL-NEXT:  Stack usage expression: 16 + calls(<external>)
 # EXTERNAL-NEXT:  Lower bound because:
 # EXTERNAL-NEXT:    unknown callees: <external> (0x0), called by external (0x1100)
 # EXTERNAL-NEXT:  Max stack path:
@@ -31,6 +33,7 @@
 ## frame, but its own callees are unknown.
 #      NO-RECORD:Entry point: no_record_callee (0x1200)
 # NO-RECORD-NEXT:  Stack usage: at least 4112 bytes (lower bound)
+# NO-RECORD-NEXT:  Stack usage expression: 4112 + calls(asm_helper)
 # NO-RECORD-NEXT:  Lower bound because:
 # NO-RECORD-NEXT:    unknown callees: asm_helper (0x2200), called by no_record_callee (0x1200)
 # NO-RECORD-NEXT:  Max stack path:
@@ -40,6 +43,7 @@
 ## No function has the type of the indirect call.
 #      UNRESOLVED:Entry point: unresolved (0x1300)
 # UNRESOLVED-NEXT:  Stack usage: at least 16 bytes (lower bound)
+# UNRESOLVED-NEXT:  Stack usage expression: 16 + indirect(type 0xbbb)
 # UNRESOLVED-NEXT:  Lower bound because:
 # UNRESOLVED-NEXT:    unresolved indirect call: unresolved (0x1300), type ID 0xbbb
 # UNRESOLVED-NEXT:  Max stack path:
@@ -51,6 +55,7 @@
 # UNTYPED-NEXT:  untyped_target (0x2500)
 #      UNTYPED:Entry point: untyped (0x1400)
 # UNTYPED-NEXT:  Stack usage: at least 48 bytes (lower bound)
+# UNTYPED-NEXT:  Stack usage expression: max(48, 16 + indirect(unknown type))
 # UNTYPED-NEXT:  Lower bound because:
 # UNTYPED-NEXT:    indirect call may reach a target of unknown type: untyped (0x1400)
 # UNTYPED-NEXT:  Max stack path:
@@ -60,6 +65,7 @@
 ## An entry point without a record has unknown callees itself.
 #      ASM:Entry point: asm_entry (0x1500)
 # ASM-NEXT:  Stack usage: at least 64 bytes (lower bound)
+# ASM-NEXT:  Stack usage expression: 64 + calls(asm_entry)
 # ASM-NEXT:  Lower bound because:
 # ASM-NEXT:    unknown callees: asm_entry (0x1500)
 # ASM-NEXT:  Max stack path:

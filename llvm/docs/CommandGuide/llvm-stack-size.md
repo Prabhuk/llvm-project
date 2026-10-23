@@ -81,8 +81,10 @@ every entry point:
 ```
 Entry point: main (0x1000)
   Stack usage: at least 4112 bytes (lower bound)
+  Stack usage expression: max(4112 + calls(asm_helper), 48 + calls(<external>))
   Lower bound because:
     unknown callees: asm_helper (0x2200), called by main (0x1000)
+    unknown callees: <external> (0x0), called by helper (0x1100)
   Max stack path:
     main (0x1000): 16 bytes
     asm_helper (0x2200): 4096 bytes, callees unknown
@@ -102,6 +104,21 @@ functions inline, then says how many more there are, as in
 members of a recursive component on the path, or `called by a (0x1000),
 b (0x1100), c (0x1200) and 5 more`. The counts are always complete, only the
 names are left out.
+
+For a lower bound, `Stack usage expression` gives the usage with the unknowns
+kept as terms. Every path from the entry point contributes the sum of its known
+frames plus a term for each unknown on it: `frame(f)` for a function without a
+frame size, `calls(f)` for the callees of a function without call graph
+information (and its own frame, when that is unknown too), `cycle(f, g)` for
+the further invocations of a recursive component, `indirect(type 0x1234)` for
+the unknown targets of an indirect call whose type ID matches no function, and
+`indirect(unknown type)` for an indirect call that may reach one of the file's
+indirect call targets of unknown type. An unknown is named by what is unknown
+rather than by the function that reaches it, so that paths which differ only in
+that function share a term. A path that cannot use more stack than another for
+any value of the unknowns is dropped, and the remaining paths form a
+`max(...)`. An expression that would name more than 64 unknowns is given as
+its number of terms and unknowns instead.
 
 ## LIMITATIONS
 

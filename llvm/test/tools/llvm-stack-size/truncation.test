@@ -23,6 +23,7 @@
 # CHECK-EMPTY:
 # CHECK-NEXT:Entry point: main (0x1000)
 # CHECK-NEXT:  Stack usage: at least 464 bytes (lower bound)
+# CHECK-NEXT:  Stack usage expression: max(464 + cycle(c0, c1, c10 and 9 more), 400 + calls(<external>) + cycle(c0, c1, c10 and 9 more), 400 + cycle(c0, c1, c10 and 9 more) + frame(u0), 400 + cycle(c0, c1, c10 and 9 more) + frame(u1), 400 + cycle(c0, c1, c10 and 9 more) + frame(u10), 400 + cycle(c0, c1, c10 and 9 more) + frame(u11), 400 + cycle(c0, c1, c10 and 9 more) + frame(u2), 400 + cycle(c0, c1, c10 and 9 more) + frame(u3), 400 + cycle(c0, c1, c10 and 9 more) + frame(u4), 400 + cycle(c0, c1, c10 and 9 more) + frame(u5), 400 + cycle(c0, c1, c10 and 9 more) + frame(u6), 400 + cycle(c0, c1, c10 and 9 more) + frame(u7), 400 + cycle(c0, c1, c10 and 9 more) + frame(u8), 400 + cycle(c0, c1, c10 and 9 more) + frame(u9))
 # CHECK-NEXT:  Lower bound because:
 # CHECK-NEXT:    cycle: c0 (0x2000), c1 (0x2010), c2 (0x2020) and 9 more
 # CHECK-NEXT:    unknown frame size: u0 (0x3000)

@@ -8,6 +8,7 @@
 
 #      CHECK:Entry point: main (0x1000)
 # CHECK-NEXT:  Stack usage: at least 120 bytes (lower bound)
+# CHECK-NEXT:  Stack usage expression: 120 + cycle(a, b) + cycle(main)
 # CHECK-NEXT:  Lower bound because:
 # CHECK-NEXT:    cycle: main (0x1000)
 # CHECK-NEXT:    cycle: a (0x2000), b (0x3000)
