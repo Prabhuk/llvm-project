@@ -1,5 +1,6 @@
 add_llvm_component_library(LLVMCallGraphSection
   CallGraph.cpp
+  ELFCallGraph.cpp
   RecordReader.cpp
 
   ADDITIONAL_HEADER_DIRS
@@ -7,5 +8,6 @@ add_llvm_component_library(LLVMCallGraphSection
 
   LINK_COMPONENTS
   BinaryFormat
+  Object
   Support
   )
