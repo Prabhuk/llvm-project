@@ -114,8 +114,8 @@ template <typename T> void appendUnique(SmallVectorImpl<T> &Vec, T Value) {
 
 template <class ELFT>
 Expected<StackSizeGraph>
-StackSizeGraph::createImpl(const ELFObjectFile<ELFT> &Obj,
-                           WarningHandler Warn) {
+StackSizeGraph::createImpl(const ELFObjectFile<ELFT> &Obj, WarningHandler Warn,
+                           ArrayRef<std::string> ExcludedFunctions) {
   const ELFFile<ELFT> &EF = Obj.getELFFile();
   const typename ELFT::Ehdr &Header = EF.getHeader();
   if (Header.e_type == ELF::ET_REL)
@@ -167,6 +167,24 @@ StackSizeGraph::createImpl(const ELFObjectFile<ELFT> &Obj,
     }
   }
 
+  // Excluded functions are dropped from everything below, so that neither
+  // they nor any call to them is seen.
+  DenseSet<uint64_t> Excluded;
+  for (StringRef Name : ExcludedFunctions) {
+    bool Found = false;
+    for (auto &[Address, Names] : NamesByAddress)
+      if (is_contained(Names, Name)) {
+        Excluded.insert(Address);
+        Found = true;
+      }
+    if (!Found)
+      Warn("excluded function '" + Name + "' is not defined in the file");
+  }
+  for (uint64_t Address : Excluded) {
+    NamesByAddress.erase(Address);
+    DynamicAddresses.erase(Address);
+  }
+
   // Frame sizes. Several entries at one address, from identical code folding,
   // resolve to the largest frame.
   constexpr uint64_t AddressSize = sizeof(typename ELFT::uint);
@@ -195,6 +213,8 @@ StackSizeGraph::createImpl(const ELFObjectFile<ELFT> &Obj,
       if (Address == 0)
         continue;
       Address = G.canonicalizeAddress(Address);
+      if (Excluded.contains(Address))
+        continue;
       uint64_t &Frame = FrameSizes[Address];
       Frame = std::max(Frame, Size);
     }
@@ -214,7 +234,7 @@ StackSizeGraph::createImpl(const ELFObjectFile<ELFT> &Obj,
     for (const CallGraphRecord &Record : *RecordsOrErr) {
       uint64_t Address = G.canonicalizeAddress(Record.Function.Value);
       // The linker resolves the entry of a discarded function to address 0.
-      if (Address == 0)
+      if (Address == 0 || Excluded.contains(Address))
         continue;
       MergedRecord &M = Records[Address];
       if (Record.isIndirectTarget()) {
@@ -224,8 +244,11 @@ StackSizeGraph::createImpl(const ELFObjectFile<ELFT> &Obj,
         else
           appendUnique(M.TypeIds, Record.FunctionTypeId);
       }
-      for (const CallGraphRecord::AddressField &Callee : Record.DirectCallees)
-        appendUnique(M.DirectCallees, G.canonicalizeAddress(Callee.Value));
+      for (const CallGraphRecord::AddressField &Callee : Record.DirectCallees) {
+        uint64_t CalleeAddress = G.canonicalizeAddress(Callee.Value);
+        if (!Excluded.contains(CalleeAddress))
+          appendUnique(M.DirectCallees, CalleeAddress);
+      }
       for (uint64_t TypeId : Record.IndirectCalleeTypeIds)
         appendUnique(M.IndirectTypeIds, TypeId);
     }
@@ -244,9 +267,9 @@ StackSizeGraph::createImpl(const ELFObjectFile<ELFT> &Obj,
   }
   for (const auto &[Address, Size] : FrameSizes)
     G.getOrCreateFunction(Address).FrameSize = Size;
-  if (Header.e_entry != 0)
-    G.setEntryFunction(
-        &G.getOrCreateFunction(G.canonicalizeAddress(Header.e_entry)));
+  if (uint64_t Entry = G.canonicalizeAddress(Header.e_entry);
+      Entry != 0 && !Excluded.contains(Entry))
+    G.setEntryFunction(&G.getOrCreateFunction(Entry));
   for (const auto &[Address, M] : Records) {
     Function &F = G.getOrCreateFunction(Address);
     F.HasRecord = true;
@@ -283,13 +306,14 @@ StackSizeGraph::createImpl(const ELFObjectFile<ELFT> &Obj,
   return std::move(G);
 }
 
-Expected<StackSizeGraph> StackSizeGraph::create(const ELFObjectFileBase &Obj,
-                                                WarningHandler Warn) {
+Expected<StackSizeGraph>
+StackSizeGraph::create(const ELFObjectFileBase &Obj, WarningHandler Warn,
+                       ArrayRef<std::string> ExcludedFunctions) {
   if (const auto *ELF = dyn_cast<ELF32LEObjectFile>(&Obj))
-    return createImpl(*ELF, Warn);
+    return createImpl(*ELF, Warn, ExcludedFunctions);
   if (const auto *ELF = dyn_cast<ELF32BEObjectFile>(&Obj))
-    return createImpl(*ELF, Warn);
+    return createImpl(*ELF, Warn, ExcludedFunctions);
   if (const auto *ELF = dyn_cast<ELF64LEObjectFile>(&Obj))
-    return createImpl(*ELF, Warn);
-  return createImpl(*cast<ELF64BEObjectFile>(&Obj), Warn);
+    return createImpl(*ELF, Warn, ExcludedFunctions);
+  return createImpl(*cast<ELF64BEObjectFile>(&Obj), Warn, ExcludedFunctions);
 }

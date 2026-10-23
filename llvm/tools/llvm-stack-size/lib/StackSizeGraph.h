@@ -114,9 +114,12 @@ public:
   using WarningHandler = function_ref<void(const Twine &)>;
 
   /// Builds the graph of \p Obj. Problems that do not prevent analysis, such
-  /// as a missing .llvm.callgraph section, are reported to \p Warn.
-  static Expected<StackSizeGraph> create(const object::ELFObjectFileBase &Obj,
-                                         WarningHandler Warn);
+  /// as a missing .llvm.callgraph section, are reported to \p Warn. The
+  /// functions named in \p ExcludedFunctions are left out along with every
+  /// call to them, as if they did not exist.
+  static Expected<StackSizeGraph>
+  create(const object::ELFObjectFileBase &Obj, WarningHandler Warn,
+         ArrayRef<std::string> ExcludedFunctions = {});
 
   StackSizeGraph() = default;
   StackSizeGraph(StackSizeGraph &&) = default;
@@ -174,7 +177,8 @@ public:
 private:
   template <class ELFT>
   static Expected<StackSizeGraph>
-  createImpl(const object::ELFObjectFile<ELFT> &Obj, WarningHandler Warn);
+  createImpl(const object::ELFObjectFile<ELFT> &Obj, WarningHandler Warn,
+             ArrayRef<std::string> ExcludedFunctions);
 
   uint16_t Machine = 0;
   std::vector<std::unique_ptr<Function>> Storage;

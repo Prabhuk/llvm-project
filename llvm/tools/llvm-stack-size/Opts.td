@@ -19,6 +19,10 @@ defm entry_point
          "Analyze this function, instead of the ELF entry point and the "
          "exported functions. A name defined at several addresses selects all "
          "of them. Repeatable.">;
+defm exclude
+    : Eq<"exclude", "<name>",
+         "Leave this function out of the analysis along with every call to "
+         "it, as if it did not exist. Repeatable.">;
 defm call_frame_overhead
     : Eq<"call-frame-overhead", "<bytes>",
          "Bytes a call pushes before the callee's frame; the default is the "

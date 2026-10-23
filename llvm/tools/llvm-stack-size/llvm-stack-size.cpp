@@ -484,10 +484,10 @@ int llvm_stack_size_main(int Argc, char **Argv, const llvm::ToolContext &) {
     return 1;
   }
 
-  Expected<StackSizeGraph> GraphOrErr =
-      StackSizeGraph::create(*Obj, [&](const Twine &Msg) {
-        reportWarning("'" + InputPath + "': " + Msg);
-      });
+  Expected<StackSizeGraph> GraphOrErr = StackSizeGraph::create(
+      *Obj,
+      [&](const Twine &Msg) { reportWarning("'" + InputPath + "': " + Msg); },
+      Args.getAllArgValues(OPT_exclude_EQ));
   if (!GraphOrErr) {
     reportError("'" + InputPath + "': " + toString(GraphOrErr.takeError()));
     return 1;

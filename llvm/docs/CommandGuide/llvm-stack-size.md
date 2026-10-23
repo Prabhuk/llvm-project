@@ -41,6 +41,14 @@ option is repeatable. Without it, the entry points are the function at the ELF
 entry point and the functions exported through the dynamic symbol table.
 :::
 
+:::{option} --exclude=<name>
+Leave the functions named *name* out of the analysis, along with every call
+to them, as if they did not exist. This asserts that they are never reached or
+use no stack; the tool does not check it. An indirect call whose only targets
+were excluded has no known targets left and is reported as unresolved. The
+option is repeatable.
+:::
+
 :::{option} --call-frame-overhead=<bytes>
 The bytes a call pushes on the stack before the callee's frame, counted once
 for every function on a path. The default is the size of the return address on
@@ -221,7 +229,8 @@ information, or that is called from code without call graph information,
 such as assembly, is not seen. A call to a function outside the file counts as
 a call of unknown depth. Tail calls count as nested calls. The estimate counts
 one invocation of each function on a cycle, so recursion always yields a lower
-bound.
+bound. Excluding a function with `--exclude` makes the result depend on the
+user's word that it is never reached.
 
 ## EXIT STATUS
 

@@ -1,0 +1,107 @@
+## --exclude leaves a function out as if it did not exist: it is not analyzed,
+## not an entry point, and calls to it are dropped. That is an assertion by
+## the user, not an analysis result. An indirect call whose only target was
+## excluded has no known targets left and is reported as unresolved.
+
+# RUN: yaml2obj %s -o %t
+# RUN: llvm-stack-size %t | FileCheck %s --check-prefix=ALL --match-full-lines
+# RUN: llvm-stack-size %t --exclude=big 2>&1 | FileCheck %s --check-prefix=NO-BIG --match-full-lines
+# RUN: llvm-stack-size %t --exclude=helper --entry-point=other | FileCheck %s --check-prefix=NO-HELPER --match-full-lines
+# RUN: llvm-stack-size %t --exclude=missing 2>&1 | FileCheck %s --check-prefix=MISSING -DFILE=%t
+
+#      ALL:Entry point: main (0x1000)
+# ALL-NEXT:  Stack usage: 4296 bytes
+#      ALL:Entry point: big (0x2000)
+
+## big is gone from the call graph and from the default entry points.
+#      NO-BIG:Entry point: main (0x1000)
+# NO-BIG-NEXT:  Stack usage: at least 32 bytes (lower bound)
+# NO-BIG-NEXT:  Stack usage expression: 32 + indirect(type 0xaa)
+# NO-BIG-NEXT:  Lower bound because:
+# NO-BIG-NEXT:    unresolved indirect call: main (0x1000), type ID 0xaa
+# NO-BIG-NEXT:  Max stack path:
+# NO-BIG-NEXT:    main (0x1000): 16 bytes + 8 bytes call overhead
+# NO-BIG-NOT:Entry point:
+
+## Without its only callee, other is a leaf, and on x86-64 gets the red zone.
+#      NO-HELPER:Entry point: other (0x1100)
+# NO-HELPER-NEXT:  Stack usage: 144 bytes
+# NO-HELPER-NEXT:  Max stack path:
+# NO-HELPER-NEXT:    other (0x1100): 8 bytes + 128 bytes red zone + 8 bytes call overhead
+
+# MISSING: warning: '[[FILE]]': excluded function 'missing' is not defined in the file
+
+--- !ELF
+FileHeader:
+  Class:   ELFCLASS64
+  Data:    ELFDATA2LSB
+  Type:    ET_EXEC
+  Machine: EM_X86_64
+  Entry:   0x1000
+Sections:
+  - Name:    .text
+    Type:    SHT_PROGBITS
+    Flags:   [ SHF_ALLOC, SHF_EXECINSTR ]
+    Address: 0x1000
+    Size:    0x10000
+  - Name: .stack_sizes
+    Type: SHT_PROGBITS
+    Entries:
+      - Address: 0x1000
+        Size:    16
+      - Address: 0x2000
+        Size:    4096
+      - Address: 0x3000
+        Size:    32
+      - Address: 0x1100
+        Size:    8
+  - Name: .llvm.callgraph
+    Type: SHT_LLVM_CALL_GRAPH
+    ContentArray: [
+      0x00,                                           ## Version
+      0x06,                                           ## Flags
+      0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Function 0x1000
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Type ID 0x0
+      0x01,                                           ## 1 direct callees
+      0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Callee 0x2000
+      0x01,                                           ## 1 indirect type IDs
+      0xaa, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Type ID 0xaa
+      0x00,                                           ## Version
+      0x03,                                           ## Flags
+      0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Function 0x2000
+      0xaa, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Type ID 0xaa
+      0x01,                                           ## 1 direct callees
+      0x00, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Callee 0x3000
+      0x00,                                           ## Version
+      0x00,                                           ## Flags
+      0x00, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Function 0x3000
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Type ID 0x0
+      0x00,                                           ## Version
+      0x02,                                           ## Flags
+      0x00, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Function 0x1100
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Type ID 0x0
+      0x01,                                           ## 1 direct callees
+      0x00, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Callee 0x3000
+    ]
+Symbols:
+  - Name:    main
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x1000
+  - Name:    big
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x2000
+  - Name:    helper
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x3000
+  - Name:    other
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x1100
+DynamicSymbols:
+  - Name:    big
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x2000
