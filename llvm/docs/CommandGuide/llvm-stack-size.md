@@ -60,6 +60,13 @@ x86-64 and 288 on PPC64, and 0 elsewhere. Pass 0 for code built with
 Write the report as JSON instead of text. See JSON OUTPUT below.
 :::
 
+:::{option} --symbolizer-markup
+Write every function address in the text report as a `{{{pc:...}}}` symbolizer
+markup element, preceded by the `{{{module:...}}}` and `{{{mmap:...}}}` context
+of the file, so that `llvm-symbolizer --filter-markup` turns the report into
+one with source locations. The file needs a build ID.
+:::
+
 :::{option} -o <file>, --output=<file>
 Write the report to *file* instead of standard output.
 :::

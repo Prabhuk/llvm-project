@@ -1,0 +1,83 @@
+## --symbolizer-markup writes every address as a {{{pc:...}}} element after
+## the module and mmap context of the file, so that
+## llvm-symbolizer --filter-markup can add source locations to the report.
+
+# RUN: yaml2obj %s -o %t
+# RUN: llvm-stack-size %t --symbolizer-markup | FileCheck %s --match-full-lines --strict-whitespace
+
+#      CHECK:{{^}}{{[{][{][{]}}reset}}}
+# CHECK-NEXT:{{^}}{{[{][{][{]}}module:0:symbolizer-markup.test.tmp:elf:0123456789abcdef}}}
+# CHECK-NEXT:{{^}}{{[{][{][{]}}mmap:0x0:0x{{[0-9a-f]+}}:load:0:r:0x0}}}
+# CHECK-NEXT:{{^}}{{[{][{][{]}}mmap:0x1000:0x2000:load:0:rx:0x1000}}}
+# CHECK-EMPTY:
+# CHECK-NEXT:Entry point: main ({{[{][{][{]}}pc:0x1000}}})
+# CHECK-NEXT:  Stack usage: at least 48 bytes (lower bound)
+# CHECK-NEXT:  Stack usage expression: max(48, 16 + calls(<external>))
+# CHECK-NEXT:  Lower bound because:
+# CHECK-NEXT:    unknown callees: <external> (0x0), called by main ({{[{][{][{]}}pc:0x1000}}})
+# CHECK-NEXT:  Max stack path:
+# CHECK-NEXT:    main ({{[{][{][{]}}pc:0x1000}}}): 16 bytes
+# CHECK-NEXT:    leaf ({{[{][{][{]}}pc:0x2000}}}): 32 bytes
+
+--- !ELF
+FileHeader:
+  Class:   ELFCLASS64
+  Data:    ELFDATA2LSB
+  Type:    ET_DYN
+  Machine: EM_AARCH64
+  Entry:   0x1000
+ProgramHeaders:
+  - Type:     PT_LOAD
+    Flags:    [ PF_R ]
+    VAddr:    0x0
+    FirstSec: .note.gnu.build-id
+    LastSec:  .note.gnu.build-id
+  - Type:     PT_LOAD
+    Flags:    [ PF_R, PF_X ]
+    VAddr:    0x1000
+    FirstSec: .text
+    LastSec:  .text
+Sections:
+  - Name:  .note.gnu.build-id
+    Type:  SHT_NOTE
+    Flags: [ SHF_ALLOC ]
+    Notes:
+      - Name: GNU
+        Type: NT_GNU_BUILD_ID
+        Desc: 0123456789abcdef
+  - Name:    .text
+    Type:    SHT_PROGBITS
+    Flags:   [ SHF_ALLOC, SHF_EXECINSTR ]
+    Address: 0x1000
+    Size:    0x2000
+  - Name: .stack_sizes
+    Type: SHT_PROGBITS
+    Entries:
+      - Address: 0x1000
+        Size:    16
+      - Address: 0x2000
+        Size:    32
+  - Name: .llvm.callgraph
+    Type: SHT_LLVM_CALL_GRAPH
+    ContentArray: [
+      0x00,                                           ## Version
+      0x02,                                           ## Flags
+      0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Function 0x1000
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Type ID 0x0
+      0x02,                                           ## 2 direct callees
+      0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Callee 0x2000
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Callee 0x0
+      0x00,                                           ## Version
+      0x00,                                           ## Flags
+      0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Function 0x2000
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Type ID 0x0
+    ]
+Symbols:
+  - Name:    main
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x1000
+  - Name:    leaf
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x2000

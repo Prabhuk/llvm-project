@@ -29,6 +29,11 @@ defm red_zone
          "pointer; the default is the ABI's size, 128 on x86-64, 288 on PPC64 "
          "and 0 elsewhere">;
 def json : FF<"json", "Write the report as JSON">;
+def symbolizer_markup
+    : FF<"symbolizer-markup",
+         "Write function addresses in the text report as symbolizer markup, "
+         "preceded by the module and mmap context of the file, so that "
+         "llvm-symbolizer --filter-markup can add source locations">;
 defm output : Eq<"output", "<file>", "Write the report to <file>">;
 def : JoinedOrSeparate<["-"], "o">, Alias<output_EQ>,
       HelpText<"Alias for --output">, MetaVarName<"<file>">;

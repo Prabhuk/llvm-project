@@ -14,7 +14,9 @@
 #include "lib/StackSizeEstimator.h"
 #include "lib/StackSizeGraph.h"
 #include "llvm/ADT/StringExtras.h"
+#include "llvm/BinaryFormat/ELF.h"
 #include "llvm/Object/Binary.h"
+#include "llvm/Object/ELF.h"
 #include "llvm/Object/ELFObjectFile.h"
 #include "llvm/Option/Arg.h"
 #include "llvm/Option/ArgList.h"
@@ -24,6 +26,7 @@
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/MathExtras.h"
+#include "llvm/Support/Path.h"
 #include "llvm/Support/StringSaver.h"
 #include "llvm/Support/ToolOutputFile.h"
 #include "llvm/Support/WithColor.h"
@@ -51,6 +54,7 @@ public:
 };
 
 StringRef ToolName;
+bool UseSymbolizerMarkup = false;
 
 void reportError(const Twine &Msg) {
   WithColor::error(errs(), ToolName) << Msg << "\n";
@@ -60,8 +64,71 @@ void reportWarning(const Twine &Msg) {
   WithColor::warning(errs(), ToolName) << Msg << "\n";
 }
 
+std::string describeAddress(const Function &F) {
+  std::string Address = "0x" + utohexstr(F.Address, true);
+  // Address 0 stands for code outside the file, which no markup can resolve.
+  if (UseSymbolizerMarkup && !F.isExternal())
+    Address = "{{{pc:" + Address + "}}}";
+  return Address;
+}
+
 std::string describe(const Function &F) {
-  return F.getDisplayName() + " (0x" + utohexstr(F.Address, true) + ")";
+  return F.getDisplayName() + " (" + describeAddress(F) + ")";
+}
+
+/// Prints the symbolizer markup context of \p Obj: its build ID as a module
+/// and its loadable segments as mappings of that module, so that a markup
+/// filter can symbolize the {{{pc:...}}} elements that follow.
+template <class ELFT>
+void printSymbolizerContext(raw_ostream &OS, const ELFObjectFile<ELFT> &Obj) {
+  const ELFFile<ELFT> &EF = Obj.getELFFile();
+  std::string BuildId;
+  for (const typename ELFT::Shdr &Sec : cantFail(EF.sections())) {
+    if (Sec.sh_type != ELF::SHT_NOTE)
+      continue;
+    size_t Align = std::max<size_t>(Sec.sh_addralign, 4);
+    Error Err = Error::success();
+    for (const typename ELFT::Note &Note : EF.notes(Sec, Err))
+      if (Note.getName() == "GNU" && Note.getType() == ELF::NT_GNU_BUILD_ID)
+        BuildId = toHex(Note.getDesc(Align), /*LowerCase=*/true);
+    consumeError(std::move(Err));
+    if (!BuildId.empty())
+      break;
+  }
+  if (BuildId.empty())
+    return;
+  Expected<typename ELFT::PhdrRange> PhdrsOrErr = EF.program_headers();
+  if (!PhdrsOrErr) {
+    consumeError(PhdrsOrErr.takeError());
+    return;
+  }
+  OS << "{{{reset}}}\n";
+  OS << "{{{module:0:" << sys::path::filename(Obj.getFileName())
+     << ":elf:" << BuildId << "}}}\n";
+  for (const typename ELFT::Phdr &Phdr : *PhdrsOrErr) {
+    if (Phdr.p_type != ELF::PT_LOAD)
+      continue;
+    std::string Flags;
+    if (Phdr.p_flags & ELF::PF_R)
+      Flags += 'r';
+    if (Phdr.p_flags & ELF::PF_W)
+      Flags += 'w';
+    if (Phdr.p_flags & ELF::PF_X)
+      Flags += 'x';
+    OS << "{{{mmap:0x" << utohexstr(Phdr.p_vaddr, true) << ":0x"
+       << utohexstr(Phdr.p_memsz, true) << ":load:0:" << Flags << ":0x"
+       << utohexstr(Phdr.p_vaddr, true) << "}}}\n";
+  }
+}
+
+void printSymbolizerContext(raw_ostream &OS, const ELFObjectFileBase &Obj) {
+  if (const auto *ELF = dyn_cast<ELF32LEObjectFile>(&Obj))
+    return printSymbolizerContext(OS, *ELF);
+  if (const auto *ELF = dyn_cast<ELF32BEObjectFile>(&Obj))
+    return printSymbolizerContext(OS, *ELF);
+  if (const auto *ELF = dyn_cast<ELF64LEObjectFile>(&Obj))
+    return printSymbolizerContext(OS, *ELF);
+  printSymbolizerContext(OS, *cast<ELF64BEObjectFile>(&Obj));
 }
 
 /// The text report lists at most this many items of one kind, then says how
@@ -192,8 +259,8 @@ void printLowerBoundReasons(raw_ostream &OS,
 
 void printEstimate(raw_ostream &OS, const StackSizeEstimator &Estimator,
                    const Estimate &E) {
-  OS << "Entry point: " << E.Entry.Name << " (0x"
-     << utohexstr(E.Entry.F->Address, true) << ")\n";
+  OS << "Entry point: " << E.Entry.Name << " (" << describeAddress(*E.Entry.F)
+     << ")\n";
   OS << "  Stack usage: ";
   if (E.IsLowerBound)
     OS << "at least ";
@@ -452,6 +519,7 @@ int llvm_stack_size_main(int Argc, char **Argv, const llvm::ToolContext &) {
     OS = &Out->os();
   }
 
+  UseSymbolizerMarkup = Args.hasArg(OPT_symbolizer_markup);
   StackSizeEstimator Estimator(G, Opts);
   if (Args.hasArg(OPT_json)) {
     json::OStream J(*OS, /*IndentSize=*/2);
@@ -462,6 +530,8 @@ int llvm_stack_size_main(int Argc, char **Argv, const llvm::ToolContext &) {
     return 0;
   }
 
+  if (UseSymbolizerMarkup)
+    printSymbolizerContext(*OS, *Obj);
   if (Opts.CallFrameOverhead || Opts.RedZoneSize)
     *OS << "Call frame overhead: " << Opts.CallFrameOverhead
         << " bytes, red zone: " << Opts.RedZoneSize << " bytes\n";
