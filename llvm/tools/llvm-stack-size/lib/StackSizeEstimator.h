@@ -82,6 +82,12 @@ struct StackUsageExpression {
   /// In decreasing order of constant. The first term is the max stack usage
   /// with every unknown at zero, and an exact estimate is that one term.
   SmallVector<StackUsageTerm, 2> Terms;
+
+  /// Whether terms were merged to keep the expression within its size limit.
+  /// A merged term bounds the paths it stands for rather than equals them, so
+  /// the expression is then an upper bound of the exact maximum. Its first
+  /// term is unchanged.
+  bool Coarsened = false;
 };
 
 /// A quantity that an estimate could not see, named in an expression by what

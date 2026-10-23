@@ -292,6 +292,12 @@ static SmallVector<unsigned, 2> unite(ArrayRef<unsigned> A,
   return Union;
 }
 
+/// The terms kept per component. The incomparable paths of a large binary
+/// can run to tens of thousands per function, and an expression that long
+/// tells a reader nothing, so past this many terms the rest are merged into
+/// one that bounds them.
+static constexpr size_t MaxTermsPerComponent = 32;
+
 void StackSizeEstimator::computeTerms(Component &C) {
   // The unknowns of the component itself apply to every path through it.
   SmallVector<unsigned, 2> Local;
@@ -366,11 +372,30 @@ void StackSizeEstimator::computeTerms(Component &C) {
                          B.Unknowns.begin(), B.Unknowns.end());
   };
   SmallVectorImpl<StackUsageTerm> &Terms = C.Expression.Terms;
-  for (StackUsageTerm &T : Unique)
-    if (llvm::none_of(Terms, [&](const StackUsageTerm &Kept) {
+  for (unsigned S : C.Successors)
+    C.Expression.Coarsened |= Components[S].Expression.Coarsened;
+  std::optional<StackUsageTerm> Bound;
+  for (StackUsageTerm &T : Unique) {
+    if (llvm::any_of(Terms, [&](const StackUsageTerm &Kept) {
           return Dominates(Kept, T);
         }))
+      continue;
+    if (Terms.size() < MaxTermsPerComponent) {
       Terms.push_back(std::move(T));
+      continue;
+    }
+    // Past the limit, the remaining terms, whose constants are no larger,
+    // are merged into one term that dominates them all: the largest of their
+    // constants, which is the first one's, with all of their unknowns.
+    if (!Bound)
+      Bound = std::move(T);
+    else
+      Bound->Unknowns = unite(Bound->Unknowns, T.Unknowns);
+  }
+  if (Bound) {
+    C.Expression.Coarsened = true;
+    Terms.push_back(std::move(*Bound));
+  }
   llvm::sort(Terms, [&](const StackUsageTerm &A, const StackUsageTerm &B) {
     if (A.Constant != B.Constant)
       return A.Constant > B.Constant;

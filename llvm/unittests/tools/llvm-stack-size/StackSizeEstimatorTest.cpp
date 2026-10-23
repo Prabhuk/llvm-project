@@ -8,6 +8,7 @@
 
 #include "../../../tools/llvm-stack-size/lib/StackSizeEstimator.h"
 #include "../../../tools/llvm-stack-size/lib/StackSizeGraph.h"
+#include "llvm/ADT/StringExtras.h"
 #include "llvm/Testing/Support/Error.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
@@ -392,6 +393,56 @@ TEST(StackSizeEstimatorTest, IndirectCallsWithUnknownTargetsAreABranch) {
   EstimatorOptions Opts;
   Opts.CallFrameOverhead = 8;
   EXPECT_EQ(expressionOf(G, Main, Opts), "max(96, 32 + indirect(type 0xbb))");
+}
+
+TEST(StackSizeEstimatorTest, ExpressionsBeyondTheTermLimitAreCoarsened) {
+  // main calls 40 functions of distinct frame sizes, each of which calls an
+  // uninstrumented function of its own, so main has 40 incomparable paths.
+  // The 32 with the largest constants stay and the other 8 merge into one
+  // term that bounds them. A caller of main inherits the coarsening.
+  GraphBuilder B;
+  Function &Caller = B.add(0x100, "caller", 8);
+  Function &Main = B.add(0x1000, "main", 16);
+  B.call(Caller, Main);
+  for (unsigned I = 1; I <= 40; ++I) {
+    Function &F = B.add(0x2000 + 0x10 * I, "f" + utostr(I), 8 * I);
+    Function &X = B.addUninstrumented(0x3000 + 0x10 * I, "x" + utostr(I));
+    B.call(Main, F);
+    B.call(F, X);
+  }
+  StackSizeGraph G = B.finish();
+
+  StackSizeEstimator Estimator(G, {});
+  Estimate E = Estimator.estimate({&Main, "main"});
+  EXPECT_EQ(E.MaxStackUsage, 16u + 8 * 40);
+  EXPECT_TRUE(E.Expression.Coarsened);
+  ASSERT_EQ(E.Expression.Terms.size(), 33u);
+  // The first term is still the stack usage, with the unknown of f40.
+  EXPECT_EQ(E.Expression.Terms.front().Constant, E.MaxStackUsage);
+  EXPECT_EQ(E.Expression.Terms.front().Unknowns.size(), 1u);
+  // The last term bounds f1 to f8: the constant of f8 and all their unknowns.
+  const StackUsageTerm &Bound = E.Expression.Terms.back();
+  EXPECT_EQ(Bound.Constant, 16u + 8 * 8);
+  ASSERT_EQ(Bound.Unknowns.size(), 8u);
+  std::vector<std::string> BoundNames;
+  for (unsigned Id : Bound.Unknowns)
+    BoundNames.push_back(Estimator.unknownNames()[Id]);
+  EXPECT_THAT(BoundNames,
+              testing::UnorderedElementsAre(
+                  "calls(x1)", "calls(x2)", "calls(x3)", "calls(x4)",
+                  "calls(x5)", "calls(x6)", "calls(x7)", "calls(x8)"));
+  // Every other term is one exact path.
+  for (const StackUsageTerm &T : ArrayRef(E.Expression.Terms).drop_back())
+    EXPECT_EQ(T.Unknowns.size(), 1u);
+
+  Estimate C = Estimator.estimate({&Caller, "caller"});
+  EXPECT_TRUE(C.Expression.Coarsened);
+  EXPECT_EQ(C.Expression.Terms.size(), 33u);
+  EXPECT_EQ(C.Expression.Terms.front().Constant, 8u + E.MaxStackUsage);
+
+  // A function with few paths is exact.
+  Function &F40 = *G.findByName("f40").front();
+  EXPECT_FALSE(Estimator.estimate({&F40, "f40"}).Expression.Coarsened);
 }
 
 TEST(StackSizeEstimatorTest, FormatStackUsageExpression) {

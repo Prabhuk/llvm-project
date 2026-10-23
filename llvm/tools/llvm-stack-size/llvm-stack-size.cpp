@@ -202,7 +202,10 @@ void printEstimate(raw_ostream &OS, const StackSizeEstimator &Estimator,
   OS << "\n";
 
   if (E.IsLowerBound) {
-    OS << "  Stack usage expression: ";
+    OS << "  Stack usage expression";
+    if (E.Expression.Coarsened)
+      OS << " (coarsened)";
+    OS << ": ";
     printExpression(OS, Estimator, E.Expression);
     OS << "\n";
     OS << "  Lower bound because:\n";

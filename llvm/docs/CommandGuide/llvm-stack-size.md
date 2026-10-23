@@ -120,6 +120,14 @@ any value of the unknowns is dropped, and the remaining paths form a
 `max(...)`. An expression that would name more than 64 unknowns is given as
 its number of terms and unknowns instead.
 
+The incomparable paths of a large binary can run to tens of thousands per
+function, so a function keeps the 32 terms with the largest constants and
+merges the rest into one term with the largest of their constants and all of
+their unknowns, which bounds every path it stands for. The expression is then
+marked `(coarsened)`: it is an upper bound of the exact expression rather than
+equal to it, and its largest constant is still the stack usage. The term limit
+only ever affects the expression, never the stack usage or the reasons.
+
 ## LIMITATIONS
 
 The analysis trusts the call graph in the file. A function that makes calls
