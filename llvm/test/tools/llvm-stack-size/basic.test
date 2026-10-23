@@ -1,0 +1,112 @@
+## A diamond: main calls left and right, both call sink. The deepest path is
+## main -> left -> sink. AArch64 has neither a call frame overhead nor a red
+## zone, so the frame sizes add up directly.
+
+# RUN: yaml2obj %s -o %t
+# RUN: llvm-stack-size %t | FileCheck %s --check-prefix=DEFAULT --match-full-lines --strict-whitespace
+# RUN: llvm-stack-size %t --entry-point=right --entry-point=0x4000 | FileCheck %s --check-prefix=NAMED --match-full-lines
+# RUN: llvm-stack-size %t -o %t.out && FileCheck %s --check-prefix=DEFAULT --match-full-lines --strict-whitespace < %t.out
+
+## The ELF entry point and the exported functions are the default entry points,
+## each once by address.
+#      DEFAULT:Entry point: main (0x1000)
+# DEFAULT-NEXT:  Stack usage: 88 bytes
+# DEFAULT-NEXT:  Max stack path:
+# DEFAULT-NEXT:    main (0x1000): 16 bytes
+# DEFAULT-NEXT:    left (0x2000): 64 bytes
+# DEFAULT-NEXT:    sink (0x4000): 8 bytes
+# DEFAULT-EMPTY:
+# DEFAULT-NEXT:Entry point: left (0x2000)
+# DEFAULT-NEXT:  Stack usage: 72 bytes
+# DEFAULT-NEXT:  Max stack path:
+# DEFAULT-NEXT:    left (0x2000): 64 bytes
+# DEFAULT-NEXT:    sink (0x4000): 8 bytes
+#  DEFAULT-NOT:Entry point:
+
+#      NAMED:Entry point: right (0x3000)
+# NAMED-NEXT:  Stack usage: 40 bytes
+# NAMED-NEXT:  Max stack path:
+# NAMED-NEXT:    right (0x3000): 32 bytes
+# NAMED-NEXT:    sink (0x4000): 8 bytes
+#      NAMED:Entry point: sink (0x4000)
+# NAMED-NEXT:  Stack usage: 8 bytes
+# NAMED-NEXT:  Max stack path:
+# NAMED-NEXT:    sink (0x4000): 8 bytes
+
+--- !ELF
+FileHeader:
+  Class:   ELFCLASS64
+  Data:    ELFDATA2LSB
+  Type:    ET_EXEC
+  Machine: EM_AARCH64
+  Entry:   0x1000
+Sections:
+  - Name:    .text
+    Type:    SHT_PROGBITS
+    Flags:   [ SHF_ALLOC, SHF_EXECINSTR ]
+    Address: 0x1000
+    Size:    0x10000
+  - Name: .stack_sizes
+    Type: SHT_PROGBITS
+    Entries:
+      - Address: 0x1000
+        Size:    16
+      - Address: 0x2000
+        Size:    64
+      - Address: 0x3000
+        Size:    32
+      - Address: 0x4000
+        Size:    8
+  - Name: .llvm.callgraph
+    Type: SHT_LLVM_CALL_GRAPH
+    ContentArray: [
+      0x00,                                           ## Version
+      0x02,                                           ## Flags
+      0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Function 0x1000
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Type ID 0x0
+      0x02,                                           ## 2 direct callees
+      0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Callee 0x2000
+      0x00, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Callee 0x3000
+      0x00,                                           ## Version
+      0x02,                                           ## Flags
+      0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Function 0x2000
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Type ID 0x0
+      0x01,                                           ## 1 direct callees
+      0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Callee 0x4000
+      0x00,                                           ## Version
+      0x02,                                           ## Flags
+      0x00, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Function 0x3000
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Type ID 0x0
+      0x01,                                           ## 1 direct callees
+      0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Callee 0x4000
+      0x00,                                           ## Version
+      0x00,                                           ## Flags
+      0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Function 0x4000
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Type ID 0x0
+    ]
+Symbols:
+  - Name:    main
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x1000
+  - Name:    left
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x2000
+  - Name:    right
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x3000
+  - Name:    sink
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x4000
+DynamicSymbols:
+  - Name:    left
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x2000
+  - Name:    main_alias
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x1000

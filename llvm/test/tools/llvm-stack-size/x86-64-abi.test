@@ -1,0 +1,73 @@
+## On x86-64 every call pushes an 8-byte return address, and a leaf may keep
+## its frame in the 128-byte red zone without moving the stack pointer, which
+## .stack_sizes does not include. Both count. --call-frame-overhead and
+## --red-zone override the ABI defaults, for example for kernels built with
+## -mno-red-zone.
+
+# RUN: yaml2obj %s -o %t
+# RUN: llvm-stack-size %t | FileCheck %s --check-prefix=ABI --match-full-lines
+# RUN: llvm-stack-size %t --red-zone=0 | FileCheck %s --check-prefix=NO-RED-ZONE --match-full-lines
+# RUN: llvm-stack-size %t --red-zone=0 --call-frame-overhead=0 | FileCheck %s --check-prefix=PLAIN --match-full-lines
+# RUN: not llvm-stack-size %t --red-zone=lots 2>&1 | FileCheck %s --check-prefix=BAD
+
+#      ABI:Call frame overhead: 8 bytes, red zone: 128 bytes
+#      ABI:Entry point: main (0x1000)
+# ABI-NEXT:  Stack usage: 192 bytes
+# ABI-NEXT:  Max stack path:
+# ABI-NEXT:    main (0x1000): 16 bytes + 8 bytes call overhead
+# ABI-NEXT:    leaf (0x2000): 32 bytes + 128 bytes red zone + 8 bytes call overhead
+
+#      NO-RED-ZONE:Call frame overhead: 8 bytes, red zone: 0 bytes
+#      NO-RED-ZONE:  Stack usage: 64 bytes
+
+#  PLAIN-NOT:Call frame overhead
+#      PLAIN:  Stack usage: 48 bytes
+# PLAIN-NEXT:  Max stack path:
+# PLAIN-NEXT:    main (0x1000): 16 bytes
+# PLAIN-NEXT:    leaf (0x2000): 32 bytes
+
+# BAD: error: invalid byte count for --red-zone=: 'lots'
+
+--- !ELF
+FileHeader:
+  Class:   ELFCLASS64
+  Data:    ELFDATA2LSB
+  Type:    ET_EXEC
+  Machine: EM_X86_64
+  Entry:   0x1000
+Sections:
+  - Name:    .text
+    Type:    SHT_PROGBITS
+    Flags:   [ SHF_ALLOC, SHF_EXECINSTR ]
+    Address: 0x1000
+    Size:    0x10000
+  - Name: .stack_sizes
+    Type: SHT_PROGBITS
+    Entries:
+      - Address: 0x1000
+        Size:    16
+      - Address: 0x2000
+        Size:    32
+  - Name: .llvm.callgraph
+    Type: SHT_LLVM_CALL_GRAPH
+    ContentArray: [
+      0x00,                                           ## Version
+      0x02,                                           ## Flags
+      0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Function 0x1000
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Type ID 0x0
+      0x01,                                           ## 1 direct callees
+      0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Callee 0x2000
+      0x00,                                           ## Version
+      0x00,                                           ## Flags
+      0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Function 0x2000
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Type ID 0x0
+    ]
+Symbols:
+  - Name:    main
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x1000
+  - Name:    leaf
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x2000

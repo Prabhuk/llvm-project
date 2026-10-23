@@ -55,6 +55,7 @@ llvm-readobj
 llvm-reduce
 llvm-remarkutil
 llvm-size
+llvm-stack-size
 llvm-stress
 llvm-strings
 llvm-strip
@@ -104,6 +105,7 @@ interested in.
 * {doc}`llvm-profdata`
 * {doc}`llvm-readobj`
 * {doc}`llvm-reduce`
+* {doc}`llvm-stack-size`
 * {doc}`llvm-stress`
 * {doc}`llvm-symbolizer`
 * {doc}`opt`

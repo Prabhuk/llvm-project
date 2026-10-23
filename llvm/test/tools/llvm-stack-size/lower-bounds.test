@@ -1,0 +1,187 @@
+## Each entry point reaches one thing that makes its estimate a lower bound.
+
+# RUN: yaml2obj %s -o %t
+# RUN: llvm-stack-size %t --entry-point=unknown_frame | FileCheck %s --check-prefix=FRAME --match-full-lines
+# RUN: llvm-stack-size %t --entry-point=external | FileCheck %s --check-prefix=EXTERNAL --match-full-lines
+# RUN: llvm-stack-size %t --entry-point=no_record_callee | FileCheck %s --check-prefix=NO-RECORD --match-full-lines
+# RUN: llvm-stack-size %t --entry-point=unresolved | FileCheck %s --check-prefix=UNRESOLVED --match-full-lines
+# RUN: llvm-stack-size %t --entry-point=untyped | FileCheck %s --check-prefix=UNTYPED --match-full-lines
+# RUN: llvm-stack-size %t --entry-point=asm_entry | FileCheck %s --check-prefix=ASM --match-full-lines
+
+## The callee has a record but no .stack_sizes entry, as for a dynamically
+## sized frame.
+#      FRAME:Entry point: unknown_frame (0x1000)
+# FRAME-NEXT:  Stack usage: at least 16 bytes (lower bound)
+# FRAME-NEXT:  Lower bound because:
+# FRAME-NEXT:    unknown frame size: vla (0x2000)
+# FRAME-NEXT:  Max stack path:
+# FRAME-NEXT:    unknown_frame (0x1000): 16 bytes
+# FRAME-NEXT:    vla (0x2000): unknown frame size
+
+## A call to another module resolves to address 0 in a linked file.
+#      EXTERNAL:Entry point: external (0x1100)
+# EXTERNAL-NEXT:  Stack usage: at least 16 bytes (lower bound)
+# EXTERNAL-NEXT:  Lower bound because:
+# EXTERNAL-NEXT:    unknown callees: <external> (0x0), called by external (0x1100)
+# EXTERNAL-NEXT:  Max stack path:
+# EXTERNAL-NEXT:    external (0x1100): 16 bytes
+# EXTERNAL-NEXT:    <external> (0x0): unknown frame size, callees unknown
+
+## A callee with a frame size but no record, such as assembly, counts its
+## frame, but its own callees are unknown.
+#      NO-RECORD:Entry point: no_record_callee (0x1200)
+# NO-RECORD-NEXT:  Stack usage: at least 4112 bytes (lower bound)
+# NO-RECORD-NEXT:  Lower bound because:
+# NO-RECORD-NEXT:    unknown callees: asm_helper (0x2200), called by no_record_callee (0x1200)
+# NO-RECORD-NEXT:  Max stack path:
+# NO-RECORD-NEXT:    no_record_callee (0x1200): 16 bytes
+# NO-RECORD-NEXT:    asm_helper (0x2200): 4096 bytes, callees unknown
+
+## No function has the type of the indirect call.
+#      UNRESOLVED:Entry point: unresolved (0x1300)
+# UNRESOLVED-NEXT:  Stack usage: at least 16 bytes (lower bound)
+# UNRESOLVED-NEXT:  Lower bound because:
+# UNRESOLVED-NEXT:    unresolved indirect call: unresolved (0x1300), type ID 0xbbb
+# UNRESOLVED-NEXT:  Max stack path:
+# UNRESOLVED-NEXT:    unresolved (0x1300): 16 bytes
+
+## The indirect call resolves to typed_target, but untyped_target is an
+## indirect call target of unknown type that no call site can rule out.
+#      UNTYPED:Indirect call targets of unknown type:
+# UNTYPED-NEXT:  untyped_target (0x2500)
+#      UNTYPED:Entry point: untyped (0x1400)
+# UNTYPED-NEXT:  Stack usage: at least 48 bytes (lower bound)
+# UNTYPED-NEXT:  Lower bound because:
+# UNTYPED-NEXT:    indirect call may reach a target of unknown type: untyped (0x1400)
+# UNTYPED-NEXT:  Max stack path:
+# UNTYPED-NEXT:    untyped (0x1400): 16 bytes
+# UNTYPED-NEXT:    typed_target (0x2400): 32 bytes
+
+## An entry point without a record has unknown callees itself.
+#      ASM:Entry point: asm_entry (0x1500)
+# ASM-NEXT:  Stack usage: at least 64 bytes (lower bound)
+# ASM-NEXT:  Lower bound because:
+# ASM-NEXT:    unknown callees: asm_entry (0x1500)
+# ASM-NEXT:  Max stack path:
+# ASM-NEXT:    asm_entry (0x1500): 64 bytes, callees unknown
+
+--- !ELF
+FileHeader:
+  Class:   ELFCLASS64
+  Data:    ELFDATA2LSB
+  Type:    ET_EXEC
+  Machine: EM_AARCH64
+Sections:
+  - Name:    .text
+    Type:    SHT_PROGBITS
+    Flags:   [ SHF_ALLOC, SHF_EXECINSTR ]
+    Address: 0x1000
+    Size:    0x10000
+  - Name: .stack_sizes
+    Type: SHT_PROGBITS
+    Entries:
+      - Address: 0x1000
+        Size:    16
+      - Address: 0x1100
+        Size:    16
+      - Address: 0x1200
+        Size:    16
+      - Address: 0x2200
+        Size:    4096
+      - Address: 0x1300
+        Size:    16
+      - Address: 0x1400
+        Size:    16
+      - Address: 0x2400
+        Size:    32
+      - Address: 0x2500
+        Size:    8192
+      - Address: 0x1500
+        Size:    64
+  - Name: .llvm.callgraph
+    Type: SHT_LLVM_CALL_GRAPH
+    ContentArray: [
+      0x00,                                           ## Version
+      0x02,                                           ## Flags
+      0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Function 0x1000
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Type ID 0x0
+      0x01,                                           ## 1 direct callees
+      0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Callee 0x2000
+      0x00,                                           ## Version
+      0x00,                                           ## Flags
+      0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Function 0x2000
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Type ID 0x0
+      0x00,                                           ## Version
+      0x02,                                           ## Flags
+      0x00, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Function 0x1100
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Type ID 0x0
+      0x01,                                           ## 1 direct callees
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Callee 0x0
+      0x00,                                           ## Version
+      0x02,                                           ## Flags
+      0x00, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Function 0x1200
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Type ID 0x0
+      0x01,                                           ## 1 direct callees
+      0x00, 0x22, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Callee 0x2200
+      0x00,                                           ## Version
+      0x04,                                           ## Flags
+      0x00, 0x13, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Function 0x1300
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Type ID 0x0
+      0x01,                                           ## 1 indirect type IDs
+      0xbb, 0x0b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Type ID 0xbbb
+      0x00,                                           ## Version
+      0x04,                                           ## Flags
+      0x00, 0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Function 0x1400
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Type ID 0x0
+      0x01,                                           ## 1 indirect type IDs
+      0xaa, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Type ID 0xaaa
+      0x00,                                           ## Version
+      0x01,                                           ## Flags
+      0x00, 0x24, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Function 0x2400
+      0xaa, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Type ID 0xaaa
+      0x00,                                           ## Version
+      0x01,                                           ## Flags
+      0x00, 0x25, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Function 0x2500
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Type ID 0x0
+    ]
+Symbols:
+  - Name:    unknown_frame
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x1000
+  - Name:    vla
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x2000
+  - Name:    external
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x1100
+  - Name:    no_record_callee
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x1200
+  - Name:    asm_helper
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x2200
+  - Name:    unresolved
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x1300
+  - Name:    untyped
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x1400
+  - Name:    typed_target
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x2400
+  - Name:    untyped_target
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x2500
+  - Name:    asm_entry
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x1500

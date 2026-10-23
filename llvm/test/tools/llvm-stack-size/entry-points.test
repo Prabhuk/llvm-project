@@ -1,0 +1,90 @@
+## A name defined at several addresses, as for identically named static
+## functions in different translation units, selects all of them, and so does
+## a glob. Two names of one function select it once. (yaml2obj writes the
+## symbols 'dup (1)' and 'dup (2)' as two symbols named dup.)
+
+# RUN: yaml2obj %s -o %t
+# RUN: llvm-stack-size %t --entry-point=dup | FileCheck %s --check-prefix=DUP --match-full-lines
+# RUN: llvm-stack-size %t --entry-point='d*' | FileCheck %s --check-prefix=DUP --match-full-lines
+# RUN: llvm-stack-size %t --entry-point='*' | FileCheck %s --check-prefix=ALL --match-full-lines
+# RUN: llvm-stack-size %t --entry-point=main --entry-point=main_alias --entry-point=0x1000 | FileCheck %s --check-prefix=ALIAS --match-full-lines
+# RUN: not llvm-stack-size %t --entry-point=missing 2>&1 | FileCheck %s --check-prefix=MISSING
+# RUN: not llvm-stack-size %t --entry-point='miss*' 2>&1 | FileCheck %s --check-prefix=NO-MATCH
+# RUN: not llvm-stack-size %t --entry-point=0x5000 2>&1 | FileCheck %s --check-prefix=NO-ADDRESS
+# RUN: not llvm-stack-size %t 2>&1 | FileCheck %s --check-prefix=NO-ENTRY
+
+#      DUP:Entry point: dup (0x2000)
+# DUP-NEXT:  Stack usage: 32 bytes
+#      DUP:Entry point: dup (0x3000)
+# DUP-NEXT:  Stack usage: 64 bytes
+#  DUP-NOT:Entry point:
+
+#     ALL:Entry point: main (0x1000)
+#     ALL:Entry point: dup (0x2000)
+#     ALL:Entry point: dup (0x3000)
+# ALL-NOT:Entry point:
+
+#       ALIAS:Entry point: main (0x1000)
+#   ALIAS-NOT:Entry point:
+
+# MISSING: error: no function named 'missing'
+# NO-MATCH: error: no function matches 'miss*'
+# NO-ADDRESS: error: no function at address 0x5000
+# NO-ENTRY: error: no entry points: the file has neither an ELF entry point nor exported functions; name them with --entry-point
+
+--- !ELF
+FileHeader:
+  Class:   ELFCLASS64
+  Data:    ELFDATA2LSB
+  Type:    ET_DYN
+  Machine: EM_AARCH64
+Sections:
+  - Name:    .text
+    Type:    SHT_PROGBITS
+    Flags:   [ SHF_ALLOC, SHF_EXECINSTR ]
+    Address: 0x1000
+    Size:    0x10000
+  - Name: .stack_sizes
+    Type: SHT_PROGBITS
+    Entries:
+      - Address: 0x1000
+        Size:    16
+      - Address: 0x2000
+        Size:    32
+      - Address: 0x3000
+        Size:    64
+  - Name: .llvm.callgraph
+    Type: SHT_LLVM_CALL_GRAPH
+    ContentArray: [
+      0x00,                                           ## Version
+      0x02,                                           ## Flags
+      0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Function 0x1000
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Type ID 0x0
+      0x01,                                           ## 1 direct callees
+      0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Callee 0x2000
+      0x00,                                           ## Version
+      0x00,                                           ## Flags
+      0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Function 0x2000
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Type ID 0x0
+      0x00,                                           ## Version
+      0x00,                                           ## Flags
+      0x00, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Function 0x3000
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Type ID 0x0
+    ]
+Symbols:
+  - Name:    main
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x1000
+  - Name:    main_alias
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x1000
+  - Name:    'dup (1)'
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x2000
+  - Name:    'dup (2)'
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x3000

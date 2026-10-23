@@ -1,0 +1,55 @@
+## A relocatable object file has no final addresses. A file without a
+## .llvm.callgraph section gets a warning and no call graph.
+
+# RUN: yaml2obj --docnum=1 %s -o %t.o
+# RUN: not llvm-stack-size %t.o 2>&1 | FileCheck %s --check-prefix=REL -DFILE=%t.o
+# RUN: yaml2obj --docnum=2 %s -o %t
+# RUN: llvm-stack-size %t 2>&1 | FileCheck %s --check-prefix=NO-SECTION -DFILE=%t --match-full-lines
+# RUN: not llvm-stack-size %t.missing 2>&1 | FileCheck %s --check-prefix=MISSING
+# RUN: not llvm-stack-size %t %t 2>&1 | FileCheck %s --check-prefix=TWO
+# RUN: not llvm-stack-size 2>&1 | FileCheck %s --check-prefix=NONE
+
+# REL: error: '[[FILE]]': relocatable object file; link it first, the call graph addresses are resolved by the linker
+
+#      NO-SECTION:{{.*}}warning: '[[FILE]]': no SHT_LLVM_CALL_GRAPH section found; compile with -fexperimental-call-graph-section to get call graph information
+#      NO-SECTION:Entry point: main (0x1000)
+# NO-SECTION-NEXT:  Stack usage: at least 16 bytes (lower bound)
+# NO-SECTION-NEXT:  Lower bound because:
+# NO-SECTION-NEXT:    unknown callees: main (0x1000)
+# NO-SECTION-NEXT:  Max stack path:
+# NO-SECTION-NEXT:    main (0x1000): 16 bytes, callees unknown
+
+# MISSING: error: '{{.*}}.missing': {{[Nn]}}o such file or directory
+# TWO: error: expected one input file
+# NONE: error: no input file
+
+--- !ELF
+FileHeader:
+  Class:   ELFCLASS64
+  Data:    ELFDATA2LSB
+  Type:    ET_REL
+  Machine: EM_AARCH64
+
+--- !ELF
+FileHeader:
+  Class:   ELFCLASS64
+  Data:    ELFDATA2LSB
+  Type:    ET_EXEC
+  Machine: EM_AARCH64
+  Entry:   0x1000
+Sections:
+  - Name:    .text
+    Type:    SHT_PROGBITS
+    Flags:   [ SHF_ALLOC, SHF_EXECINSTR ]
+    Address: 0x1000
+    Size:    0x10000
+  - Name: .stack_sizes
+    Type: SHT_PROGBITS
+    Entries:
+      - Address: 0x1000
+        Size:    16
+Symbols:
+  - Name:    main
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x1000

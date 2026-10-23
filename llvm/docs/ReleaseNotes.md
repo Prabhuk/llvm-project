@@ -464,6 +464,11 @@ Makes programs 10x faster by doing Special New Thing.
 * llvm-rc now supports `/showIncludes` to report header and resource-file
   dependencies in a format compatible with Ninja's `deps = msvc` mode.
 
+* `llvm-stack-size` is a new tool that estimates the worst-case stack usage of
+  the entry points of a linked ELF file from the call graph and frame sizes
+  recorded under `-fexperimental-call-graph-section` and
+  `-fstack-size-section`.
+
 ### Changes to LLDB
 
 * `platform.plugin.wasm.runtime-args` now precede the port argument on the Wasm

@@ -1,0 +1,56 @@
+## PPC64 leaves may use a 288-byte red zone below the stack pointer, which
+## .stack_sizes does not include.
+
+# RUN: yaml2obj %s -o %t
+# RUN: llvm-stack-size %t | FileCheck %s --match-full-lines
+
+#      CHECK:Call frame overhead: 0 bytes, red zone: 288 bytes
+#      CHECK:Entry point: main (0x1000)
+# CHECK-NEXT:  Stack usage: 336 bytes
+# CHECK-NEXT:  Max stack path:
+# CHECK-NEXT:    main (0x1000): 16 bytes
+# CHECK-NEXT:    leaf (0x2000): 32 bytes + 288 bytes red zone
+
+--- !ELF
+FileHeader:
+  Class:   ELFCLASS64
+  Data:    ELFDATA2LSB
+  Type:    ET_EXEC
+  Machine: EM_PPC64
+  Entry:   0x1000
+Sections:
+  - Name:    .text
+    Type:    SHT_PROGBITS
+    Flags:   [ SHF_ALLOC, SHF_EXECINSTR ]
+    Address: 0x1000
+    Size:    0x10000
+  - Name: .stack_sizes
+    Type: SHT_PROGBITS
+    Entries:
+      - Address: 0x1000
+        Size:    16
+      - Address: 0x2000
+        Size:    32
+  - Name: .llvm.callgraph
+    Type: SHT_LLVM_CALL_GRAPH
+    ContentArray: [
+      0x00,                                           ## Version
+      0x02,                                           ## Flags
+      0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Function 0x1000
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Type ID 0x0
+      0x01,                                           ## 1 direct callees
+      0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Callee 0x2000
+      0x00,                                           ## Version
+      0x00,                                           ## Flags
+      0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Function 0x2000
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ## Type ID 0x0
+    ]
+Symbols:
+  - Name:    main
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x1000
+  - Name:    leaf
+    Type:    STT_FUNC
+    Section: .text
+    Value:   0x2000
