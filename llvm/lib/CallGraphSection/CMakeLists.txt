@@ -2,6 +2,7 @@ add_llvm_component_library(LLVMCallGraphSection
   CallGraph.cpp
   ELFCallGraph.cpp
   RecordReader.cpp
+  StackSizeEstimator.cpp
 
   ADDITIONAL_HEADER_DIRS
   ${LLVM_MAIN_INCLUDE_DIR}/llvm/CallGraphSection
