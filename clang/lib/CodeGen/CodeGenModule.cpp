@@ -3747,10 +3747,12 @@ void CodeGenModule::createIndirectFunctionTypeMD(const FunctionDecl *FD,
     // A function definition is annotated when its declaration is created and
     // again when its body is emitted. Replace the attachment instead of adding
     // a second one, so that a function carries exactly one type identifier.
-    F->setMetadata(
-        llvm::LLVMContext::MD_callgraph,
-        llvm::MDTuple::get(getLLVMContext(),
-                           {CreateMetadataIdentifierForCallGraphType(QT)}));
+    const auto *MD = dyn_cast<CXXMethodDecl>(Def);
+    bool IsMember = MD && MD->isInstance();
+    F->setMetadata(llvm::LLVMContext::MD_callgraph,
+                   llvm::MDTuple::get(getLLVMContext(),
+                                      {CreateMetadataIdentifierForCallGraphType(
+                                          QT, IsMember)}));
   }
 }
 
@@ -3781,12 +3783,14 @@ void CodeGenModule::createFunctionTypeMetadataForIcall(const FunctionDecl *FD,
 }
 
 void CodeGenModule::createCalleeTypeMetadataForIcall(const QualType &QT,
-                                                     llvm::CallBase *CB) {
+                                                     llvm::CallBase *CB,
+                                                     bool IsMember) {
   // Only if needed for call graph section and only for indirect calls
   if (!CodeGenOpts.CallGraphSection || !CB->isIndirectCall())
     return;
 
-  llvm::Metadata *TypeIdMD = CreateMetadataIdentifierForCallGraphType(QT);
+  llvm::Metadata *TypeIdMD =
+      CreateMetadataIdentifierForCallGraphType(QT, IsMember);
   llvm::MDTuple *TypeTuple = llvm::MDTuple::get(getLLVMContext(), {TypeIdMD});
   llvm::MDTuple *MDN = llvm::MDNode::get(getLLVMContext(), {TypeTuple});
   CB->setMetadata(llvm::LLVMContext::MD_callee_type, MDN);
@@ -8817,9 +8821,13 @@ QualType CodeGenModule::ReconstructCallGraphPrototype(
 }
 
 llvm::Metadata *
-CodeGenModule::CreateMetadataIdentifierForCallGraphType(QualType T) {
+CodeGenModule::CreateMetadataIdentifierForCallGraphType(QualType T,
+                                                        bool IsMember) {
   if (auto *FNPT = T->getAs<FunctionNoProtoType>())
     T = ReconstructCallGraphPrototype(FNPT, {});
+  if (IsMember)
+    return CreateMetadataIdentifierImpl(T, CallGraphMemberMetadataIdMap,
+                                        ".member", /*ForceString=*/true);
   return CreateMetadataIdentifierImpl(T, CallGraphMetadataIdMap, "",
                                       /*ForceString=*/true);
 }
