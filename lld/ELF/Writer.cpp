@@ -1269,10 +1269,150 @@ static void sortSection(Ctx &ctx, OutputSection &osec,
   }
 }
 
+// Returns true if a relocation of the given type reaches only a short distance
+// and is never redirected through a range extension thunk, so that the
+// section containing it must stay close to the section it refers to.
+static bool isShortRangeUnthunkedRelocation(uint16_t machine, uint32_t type) {
+  switch (machine) {
+  case EM_AARCH64:
+    return type == R_AARCH64_CONDBR19 || type == R_AARCH64_TSTBR14 ||
+           type == R_AARCH64_ADR_PREL_LO21 || type == R_AARCH64_LD_PREL_LO19;
+  case EM_RISCV:
+    return type == R_RISCV_BRANCH || type == R_RISCV_JAL ||
+           type == R_RISCV_RVC_BRANCH || type == R_RISCV_RVC_JUMP;
+  default:
+    return false;
+  }
+}
+
+// A section order may separate sections that refer to each other through
+// relocations that neither reach far nor go through thunks, such as a
+// conditional branch from hand-written assembly into another section of the
+// same object file. Merge such sections into groups and give each group
+// consecutive priorities at the position of its highest priority member, so
+// that the members stay adjacent in their original relative order.
+template <class ELFT>
+static void keepShortRangeRelocatedSectionsTogether(
+    Ctx &ctx, DenseMap<const InputSectionBase *, int> &order) {
+  if (order.empty())
+    return;
+
+  DenseMap<const InputSection *, const InputSection *> parent;
+  DenseMap<const InputSection *, size_t> inputPosition;
+  auto find = [&](const InputSection *sec) {
+    const InputSection *root = sec;
+    while (true) {
+      auto it = parent.find(root);
+      if (it == parent.end() || it->second == root)
+        break;
+      root = it->second;
+    }
+    parent[sec] = root;
+    return root;
+  };
+
+  bool anyGroup = false;
+  for (ELFFileBase *file : ctx.objectFiles) {
+    auto *obj = cast<ObjFile<ELFT>>(file);
+    for (InputSectionBase *base : obj->getSections()) {
+      auto *sec = dyn_cast_or_null<InputSection>(base);
+      if (!sec || sec == &InputSection::discarded || !sec->isLive() ||
+          !(sec->flags & SHF_EXECINSTR) || !sec->getParent())
+        continue;
+      inputPosition.try_emplace(sec, inputPosition.size());
+
+      auto processReloc = [&](uint32_t type, uint32_t symIndex) {
+        if (!isShortRangeUnthunkedRelocation(ctx.arg.emachine, type))
+          return;
+        auto *d = dyn_cast<Defined>(&obj->getSymbol(symIndex));
+        if (!d)
+          return;
+        auto *target = dyn_cast_or_null<InputSection>(d->section);
+        if (!target || target == sec || !target->isLive() ||
+            target->getParent() != sec->getParent())
+          return;
+        inputPosition.try_emplace(target, inputPosition.size());
+        const InputSection *a = find(sec);
+        const InputSection *b = find(target);
+        if (a != b) {
+          parent[b] = a;
+          anyGroup = true;
+        }
+      };
+      const RelsOrRelas<ELFT> rels =
+          sec->template relsOrRelas<ELFT>(/*supportsCrel=*/false);
+      for (const typename ELFT::Rela &rel : rels.relas)
+        processReloc(rel.getType(ctx.arg.isMips64EL),
+                     rel.getSymbol(ctx.arg.isMips64EL));
+      for (const typename ELFT::Rel &rel : rels.rels)
+        processReloc(rel.getType(ctx.arg.isMips64EL),
+                     rel.getSymbol(ctx.arg.isMips64EL));
+    }
+  }
+  if (!anyGroup)
+    return;
+
+  // Collect the members of every group that has at least one ordered member.
+  DenseMap<const InputSection *, SmallVector<const InputSection *, 4>> groups;
+  for (auto &entry : inputPosition) {
+    const InputSection *sec = entry.first;
+    const InputSection *root = find(sec);
+    if (root != sec || parent.count(sec))
+      groups[root].push_back(sec);
+  }
+
+  // Rank every ordered section and every group by the best priority it has,
+  // then renumber so that the members of a group are consecutive.
+  struct Slot {
+    int priority;
+    size_t position;
+    SmallVector<const InputSectionBase *, 4> members;
+  };
+  SmallVector<Slot, 0> slots;
+  DenseSet<const InputSectionBase *> grouped;
+  for (auto &[root, members] : groups) {
+    if (members.size() < 2)
+      continue;
+    std::optional<int> best;
+    for (const InputSection *m : members)
+      if (auto it = order.find(m); it != order.end())
+        best = best ? std::min(*best, it->second) : it->second;
+    if (!best)
+      continue;
+    llvm::sort(members, [&](const InputSection *a, const InputSection *b) {
+      return inputPosition.lookup(a) < inputPosition.lookup(b);
+    });
+    Slot slot{*best, inputPosition.lookup(members.front()), {}};
+    for (const InputSection *m : members) {
+      grouped.insert(m);
+      slot.members.push_back(m);
+    }
+    slots.push_back(std::move(slot));
+  }
+  if (slots.empty())
+    return;
+  for (auto &[sec, priority] : order)
+    if (!grouped.contains(sec))
+      slots.push_back({priority, 0, {sec}});
+  llvm::sort(slots, [](const Slot &a, const Slot &b) {
+    return std::tie(a.priority, a.position) < std::tie(b.priority, b.position);
+  });
+
+  size_t total = 0;
+  for (const Slot &s : slots)
+    total += s.members.size();
+  order.clear();
+  int next = -static_cast<int>(total);
+  for (const Slot &s : slots)
+    for (const InputSectionBase *m : s.members)
+      order[m] = next++;
+}
+
 // Sort sections within each InputSectionDescription.
 template <class ELFT> void Writer<ELFT>::sortInputSections() {
   // Assign negative priorities.
   DenseMap<const InputSectionBase *, int> order = buildSectionOrder(ctx);
+  keepShortRangeRelocatedSectionsTogether<ELFT>(ctx, order);
   // Assign non-negative priorities due to --shuffle-sections.
   maybeShuffle(ctx, order);
   for (SectionCommand *cmd : ctx.script->sectionCommands)
