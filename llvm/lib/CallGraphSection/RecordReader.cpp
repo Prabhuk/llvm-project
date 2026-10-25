@@ -94,6 +94,12 @@ Error RecordReader::readRecord(FunctionRecord &Record) {
     Record.IndirectCalleeTypeIds.reserve(*Count);
     for (uint64_t I = 0; I != *Count; ++I)
       Record.IndirectCalleeTypeIds.push_back(Extractor.getU64(Cursor));
+    if (Record.hasIndirectCalleeFrequencies()) {
+      Record.IndirectCalleeFrequencies.reserve(*Count);
+      for (uint64_t I = 0; I != *Count; ++I)
+        Record.IndirectCalleeFrequencies.push_back(
+            Extractor.getULEB128(Cursor));
+    }
   }
 
   if (!Cursor)

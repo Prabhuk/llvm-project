@@ -55,9 +55,17 @@ struct FunctionRecord {
   /// Type IDs of the signatures this function calls indirectly.
   SmallVector<uint64_t, 4> IndirectCalleeTypeIds;
 
+  /// Estimated calls through each of IndirectCalleeTypeIds per call of this
+  /// function, scaled by IndirectCalleeFrequencyScale. Empty if the record
+  /// has no frequencies.
+  SmallVector<uint64_t, 4> IndirectCalleeFrequencies;
+
   bool isIndirectTarget() const { return RecordFlags & IsIndirectTarget; }
   bool hasDirectCallees() const { return RecordFlags & HasDirectCallees; }
   bool hasIndirectCallees() const { return RecordFlags & HasIndirectCallees; }
+  bool hasIndirectCalleeFrequencies() const {
+    return RecordFlags & HasIndirectCalleeFrequencies;
+  }
 
   void clear() {
     RecordFlags = None;
@@ -65,6 +73,7 @@ struct FunctionRecord {
     FunctionTypeId = 0;
     DirectCalleeAddressOffsets.clear();
     IndirectCalleeTypeIds.clear();
+    IndirectCalleeFrequencies.clear();
   }
 };
 

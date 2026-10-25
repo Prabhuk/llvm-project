@@ -846,6 +846,10 @@ struct CallGraphRecord {
   SmallVector<AddressField, 4> DirectCallees;
   // The type IDs of the indirect calls the function makes.
   SmallVector<uint64_t, 4> IndirectCalleeTypeIds;
+  // Estimated calls through each of IndirectCalleeTypeIds per call of the
+  // function, scaled by callgraph::IndirectCalleeFrequencyScale. Empty if the
+  // record has no frequencies.
+  SmallVector<uint64_t, 4> IndirectCalleeFrequencies;
 
   bool isIndirectTarget() const {
     return (Flags & callgraph::IsIndirectTarget) != 0;
@@ -855,6 +859,9 @@ struct CallGraphRecord {
   }
   bool hasIndirectCallees() const {
     return (Flags & callgraph::HasIndirectCallees) != 0;
+  }
+  bool hasIndirectCalleeFrequencies() const {
+    return (Flags & callgraph::HasIndirectCalleeFrequencies) != 0;
   }
 };
 

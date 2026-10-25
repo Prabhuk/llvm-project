@@ -23,6 +23,12 @@
 //   [ if Flags & HasIndirectCallees ]
 //     uleb128 NumIndirectCalleeTypeIds
 //     uint64  IndirectCalleeTypeId[NumIndirectCalleeTypeIds]
+//     [ if Flags & HasIndirectCalleeFrequencies ]
+//       uleb128 IndirectCalleeFrequency[NumIndirectCalleeTypeIds]
+//
+// An indirect callee frequency is the estimated number of calls through the
+// corresponding type ID per call of the function, in units of
+// 1/IndirectCalleeFrequencyScale, summed over the function's call sites.
 //
 //===----------------------------------------------------------------------===//
 
@@ -53,12 +59,18 @@ enum Flags : uint8_t {
   HasDirectCallees = 1u << 1,
   /// The record carries an indirect callee type ID array.
   HasIndirectCallees = 1u << 2,
-  LLVM_MARK_AS_BITMASK_ENUM(/*LargestValue=*/HasIndirectCallees)
+  /// The indirect callee type ID array is followed by a frequency array.
+  HasIndirectCalleeFrequencies = 1u << 3,
+  LLVM_MARK_AS_BITMASK_ENUM(/*LargestValue=*/HasIndirectCalleeFrequencies)
 };
 
 /// Bitmask of all defined `Flags` bits in format version 0.
-inline constexpr Flags ValidFlags =
-    IsIndirectTarget | HasDirectCallees | HasIndirectCallees;
+inline constexpr Flags ValidFlags = IsIndirectTarget | HasDirectCallees |
+                                    HasIndirectCallees |
+                                    HasIndirectCalleeFrequencies;
+
+/// Frequency of a call that executes once per call of its caller.
+inline constexpr uint64_t IndirectCalleeFrequencyScale = 1024;
 
 } // namespace callgraph
 } // namespace llvm

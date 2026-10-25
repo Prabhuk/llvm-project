@@ -1971,7 +1971,7 @@ Sections:
   }
   {
     SCOPED_TRACE("unsupported flags");
-    DoCheck("0x00, 0x08", "unsupported Flags value [8]");
+    DoCheck("0x00, 0x10", "unsupported Flags value [16]");
   }
   {
     SCOPED_TRACE("truncated function address");

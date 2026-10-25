@@ -36,14 +36,14 @@ FileHeader:
 
 # WARN-MISSING-FLAG: warning: '[[FILE]]': failed while reading call graph info's Flags: unexpected end of data at offset 0x1 while reading [0x1, 0x2)
 
-## Check Flags. Only valid Flag values are 0x00 to 0x07.
-# RUN: yaml2obj --docnum=2 -DCONTENT=0x00,0x08 %s -o %t4
+## Check Flags. Only valid Flag values are 0x00 to 0x0f.
+# RUN: yaml2obj --docnum=2 -DCONTENT=0x00,0x10 %s -o %t4
 # RUN: llvm-readobj --elf-output-style=LLVM --call-graph-info %t4 2>&1 | \
 # RUN:   FileCheck %s -DFILE=%t4 --check-prefix=WARN-FLAG
 # RUN: llvm-readobj --elf-output-style=JSON --pretty-print --call-graph-info %t4 2>&1 | \
 # RUN:   FileCheck %s -DFILE=%t4 --check-prefix=WARN-FLAG
 
-# WARN-FLAG: warning: '[[FILE]]': unsupported Flags value [8]
+# WARN-FLAG: warning: '[[FILE]]': unsupported Flags value [16]
 
 --- !ELF
 FileHeader:

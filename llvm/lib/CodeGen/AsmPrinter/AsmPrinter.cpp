@@ -178,6 +178,12 @@ static cl::opt<bool> BBAddrMapSkipEmitBBEntries(
              "unnecessary for some PGOAnalysisMap features."),
     cl::Hidden, cl::init(false));
 
+static cl::opt<bool> CallGraphSectionFrequencies(
+    "call-graph-section-frequencies",
+    cl::desc("Record the estimated frequency of indirect calls per callee "
+             "type ID in the call graph section"),
+    cl::init(false), cl::Hidden);
+
 static cl::opt<bool> EmitJumpTableSizesSection(
     "emit-jump-table-sizes-section",
     cl::desc("Emit a section containing jump table addresses and sizes"),
@@ -1818,8 +1824,11 @@ void AsmPrinter::emitCallGraphSection(const MachineFunction &MF,
     CGFlags |= Flags::IsIndirectTarget;
   if (DirectCallees.size() > 0)
     CGFlags |= Flags::HasDirectCallees;
-  if (IndirectCalleeTypeIDs.size() > 0)
+  if (IndirectCalleeTypeIDs.size() > 0) {
     CGFlags |= Flags::HasIndirectCallees;
+    if (CallGraphSectionFrequencies)
+      CGFlags |= Flags::HasIndirectCalleeFrequencies;
+  }
 
   // Emit function's call graph information.
   // 1) CallGraphSectionFormatVersion
@@ -1857,7 +1866,12 @@ void AsmPrinter::emitCallGraphSection(const MachineFunction &MF,
     OutStreamer->emitULEB128IntValue(IndirectCalleeTypeIDs.size());
     for (const auto &CalleeTypeId : IndirectCalleeTypeIDs)
       OutStreamer->emitInt64(CalleeTypeId);
+    if (CGFlags & Flags::HasIndirectCalleeFrequencies)
+      for (const auto &CalleeTypeId : IndirectCalleeTypeIDs)
+        OutStreamer->emitULEB128IntValue(
+            FuncCGInfo.IndirectCalleeFrequencies.lookup(CalleeTypeId));
     FuncCGInfo.IndirectCalleeTypeIDs.clear();
+    FuncCGInfo.IndirectCalleeFrequencies.clear();
   }
   // End of emitting call graph section contents.
   OutStreamer->popSection();
@@ -2035,9 +2049,21 @@ void AsmPrinter::handleCallsiteForCallgraph(
     return;
   // Handle indirect callsite info.
   // Only indirect calls have type identifiers set.
+  uint64_t Frequency = 0;
+  if (CallGraphSectionFrequencies) {
+    double Relative =
+        GetMBFI(*MF)->getBlockFreqRelativeToEntryBlock(MI.getParent());
+    Frequency = static_cast<uint64_t>(
+        std::min(Relative * callgraph::IndirectCalleeFrequencyScale,
+                 double(UINT32_MAX)));
+  }
   for (ConstantInt *CalleeTypeId : CallSiteInfo->second.CalleeTypeIds) {
     uint64_t CalleeTypeIdVal = CalleeTypeId->getZExtValue();
     FuncCGInfo.IndirectCalleeTypeIDs.insert(CalleeTypeIdVal);
+    if (CallGraphSectionFrequencies) {
+      uint64_t &Sum = FuncCGInfo.IndirectCalleeFrequencies[CalleeTypeIdVal];
+      Sum = std::min<uint64_t>(Sum + Frequency, UINT32_MAX);
+    }
   }
 }
 

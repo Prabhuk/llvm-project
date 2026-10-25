@@ -951,6 +951,17 @@ ELFFile<ELFT>::decodeCallGraphSection(const Elf_Shdr &Sec) const {
                              toString(C.takeError()));
         Record.IndirectCalleeTypeIds.push_back(TypeId);
       }
+      if (Record.hasIndirectCalleeFrequencies()) {
+        Record.IndirectCalleeFrequencies.reserve(PlausibleCount(NumTypeIds, 1));
+        for (uint64_t I = 0; I < NumTypeIds; ++I) {
+          uint64_t Frequency = Data.getULEB128(C);
+          if (!C)
+            return createError(
+                "failed while reading indirect callee frequency: " +
+                toString(C.takeError()));
+          Record.IndirectCalleeFrequencies.push_back(Frequency);
+        }
+      }
     }
 
     Records.push_back(std::move(Record));

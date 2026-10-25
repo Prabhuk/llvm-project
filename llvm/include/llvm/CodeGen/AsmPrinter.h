@@ -227,6 +227,9 @@ private:
 
     /// Unique target type IDs.
     SmallSetVector<CGTypeId, 4> IndirectCalleeTypeIDs;
+    /// Estimated calls through each target type ID per call of the function,
+    /// scaled by callgraph::IndirectCalleeFrequencyScale.
+    DenseMap<CGTypeId, uint64_t> IndirectCalleeFrequencies;
     /// Unique direct callees.
     SmallSetVector<MCSymbol *, 4> DirectCallees;
   };
