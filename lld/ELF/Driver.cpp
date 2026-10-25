@@ -1360,6 +1360,10 @@ static void readCallGraphFromCallGraphSection(Ctx &ctx) {
     bool allClaimIndirect = true;
   };
   DenseMap<const InputSectionBase *, SectionRecords> sectionRecords;
+  // Estimated calls per call of the caller, scaled by
+  // IndirectCalleeFrequencyScale, keyed by caller node and callee type ID.
+  // Only records that carry frequencies contribute.
+  DenseMap<std::pair<cg::NodeId, uint64_t>, uint64_t> indirectFrequencies;
 
   for (ELFFileBase *file : ctx.objectFiles) {
     auto *obj = cast<ObjFile<ELFT>>(file);
@@ -1427,6 +1431,10 @@ static void readCallGraphFromCallGraphSection(Ctx &ctx) {
         node.DirectCallees.append(callees.begin(), callees.end());
         node.IndirectCalleeTypeIds.append(record.IndirectCalleeTypeIds.begin(),
                                           record.IndirectCalleeTypeIds.end());
+        for (auto [typeId, frequency] :
+             llvm::zip(record.IndirectCalleeTypeIds,
+                       record.IndirectCalleeFrequencies))
+          indirectFrequencies[{caller, typeId}] += frequency;
       }
     }
   }
@@ -1505,11 +1513,14 @@ static void readCallGraphFromCallGraphSection(Ctx &ctx) {
   // Combine mode: the call graph profile already weighs the direct calls of
   // compiled code, on the scale where a call executed once per call of its
   // caller weighs kCombineOncePerCall (see -cg-profile-static-estimate). Add
-  // what that profile cannot see, on the same scale, assuming one execution
-  // per call of the caller: the direct calls of code without records (hand
-  // written assembly, from its branch relocations), and every indirect call
-  // site, split evenly among its type-compatible candidates.
+  // what that profile cannot see, on the same scale: the direct calls of code
+  // without records (hand written assembly, from its branch relocations),
+  // assumed to execute once per call of the caller, and every indirect call
+  // site, split evenly among its type-compatible candidates. An indirect call
+  // site weighs its recorded frequency if the record has one, and one
+  // execution per call of the caller otherwise.
   constexpr uint64_t kCombineOncePerCall = 1024;
+  static_assert(kCombineOncePerCall == cg::IndirectCalleeFrequencyScale);
   constexpr size_t kCombineMaxFanOut = 64;
   for (const cg::FunctionNode &caller : graph.nodes()) {
     if (!caller.IsExecutable || caller.Id >= nodeToSection.size())
@@ -1524,7 +1535,12 @@ static void readCallGraphFromCallGraphSection(Ctx &ctx) {
       size_t fanOut = site.Targets.size();
       if (fanOut == 0 || fanOut > kCombineMaxFanOut)
         continue;
-      uint64_t weight = std::max<uint64_t>(1, kCombineOncePerCall / fanOut);
+      auto it = indirectFrequencies.find({caller.Id, site.TypeId});
+      uint64_t siteWeight =
+          it == indirectFrequencies.end() ? kCombineOncePerCall : it->second;
+      if (siteWeight == 0)
+        continue;
+      uint64_t weight = std::max<uint64_t>(1, siteWeight / fanOut);
       for (cg::NodeId target : site.Targets)
         if (target != caller.Id && graph[target].IsExecutable &&
             target < nodeToSection.size())
