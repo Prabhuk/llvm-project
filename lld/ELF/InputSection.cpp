@@ -292,7 +292,9 @@ InputSection *InputSectionBase::getLinkOrderDep() const {
   assert(flags & SHF_LINK_ORDER);
   if (!link)
     return nullptr;
-  return cast<InputSection>(file->getSections()[link]);
+  // If ICF folded the dependency, the section it was folded into stands in
+  // for it.
+  return cast<InputSection>(file->getSections()[link])->repl;
 }
 
 // Find a symbol that encloses a given location.

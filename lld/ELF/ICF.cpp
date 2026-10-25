@@ -594,9 +594,12 @@ template <class ELFT> void ICF<ELFT>::run() {
 
       // At this point we know sections merged are fully identical and hence
       // we want to remove duplicate implicit dependencies such as link order
-      // and relocation sections.
+      // and relocation sections. Call graph records are kept, since the
+      // folded function's record carries its own type ID, and the kept
+      // section must remain an indirect call target of that type.
       for (InputSection *isec : sections[i]->dependentSections)
-        isec->markDead();
+        if (isec->type != SHT_LLVM_CALL_GRAPH)
+          isec->markDead();
     }
   });
 
