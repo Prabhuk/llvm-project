@@ -17,10 +17,22 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/ProfileData/InstrProf.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Transforms/Utils/Instrumentation.h"
+#include <limits>
 #include <optional>
 
 using namespace llvm;
+
+static cl::opt<bool> StaticEstimate(
+    "cg-profile-static-estimate", cl::Hidden, cl::init(false),
+    cl::desc("For functions without a profile entry count, weigh direct "
+             "calls by the static block frequency of the call site relative "
+             "to the function entry"));
+
+// The weight of a call site that executes once per call of its function, when
+// estimating statically.
+static constexpr uint64_t StaticEntryWeight = 1024;
 
 static bool
 addModuleFlags(Module &M,
@@ -62,20 +74,32 @@ static bool runCGProfilePass(Module &M, FunctionAnalysisManager &FAM,
   // Ignore error here.  Indirect calls are ignored if this fails.
   consumeError(Symtab.create(M, InLTO));
   for (auto &F : M) {
+    if (F.isDeclaration())
+      continue;
     // Avoid extra cost of running passes for BFI when the function doesn't have
-    // entry count.
-    if (F.isDeclaration() || !F.getEntryCount())
+    // entry count, unless estimating statically.
+    bool HasEntryCount = F.getEntryCount().has_value();
+    if (!HasEntryCount && !StaticEstimate)
       continue;
     auto &BFI = FAM.getResult<BlockFrequencyAnalysis>(F);
     if (BFI.getEntryFreq() == BlockFrequency(0))
       continue;
     TargetTransformInfo &TTI = FAM.getResult<TargetIRAnalysis>(F);
     for (auto &BB : F) {
-      std::optional<uint64_t> BBCount = BFI.getBlockProfileCount(&BB);
+      std::optional<uint64_t> BBCount;
+      if (HasEntryCount)
+        BBCount = BFI.getBlockProfileCount(&BB);
+      else if (std::optional<BlockFrequency> Scaled =
+                   BFI.getBlockFreq(&BB).mul(StaticEntryWeight))
+        BBCount = Scaled->getFrequency() / BFI.getEntryFreq().getFrequency();
+      else
+        BBCount = std::numeric_limits<uint64_t>::max();
       if (!BBCount)
         continue;
       for (CallBase &CB : make_isa_range<CallBase>(BB)) {
         if (CB.isIndirectCall()) {
+          if (!HasEntryCount)
+            continue;
           uint64_t TotalC;
           auto ValueData =
               getValueProfDataFromInst(CB, IPVK_IndirectCallTarget, 8, TotalC);
