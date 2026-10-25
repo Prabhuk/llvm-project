@@ -1489,11 +1489,47 @@ static void readCallGraphFromCallGraphSection(Ctx &ctx) {
   // Step 5: Reconstruct the graph and derive layout edges.
   cg::CallGraph graph = builder.build();
 
-  for (const cg::WeightedEdge &edge : cg::computeLayoutEdges(graph)) {
-    InputSectionBase *from = nodeToSection[edge.From];
-    InputSectionBase *to = nodeToSection[edge.To];
+  auto addEdge = [&](cg::NodeId fromNode, cg::NodeId toNode, uint64_t weight) {
+    InputSectionBase *from = nodeToSection[fromNode];
+    InputSectionBase *to = nodeToSection[toNode];
     if (from->isLive() && to->isLive())
-      ctx.arg.callGraphProfile[{from, to}] += edge.Weight;
+      ctx.arg.callGraphProfile[{from, to}] += weight;
+  };
+
+  if (ctx.arg.callGraphSection != CallGraphSectionMode::Combine) {
+    for (const cg::WeightedEdge &edge : cg::computeLayoutEdges(graph))
+      addEdge(edge.From, edge.To, edge.Weight);
+    return;
+  }
+
+  // Combine mode: the call graph profile already weighs the direct calls of
+  // compiled code, on the scale where a call executed once per call of its
+  // caller weighs kCombineOncePerCall (see -cg-profile-static-estimate). Add
+  // what that profile cannot see, on the same scale, assuming one execution
+  // per call of the caller: the direct calls of code without records (hand
+  // written assembly, from its branch relocations), and every indirect call
+  // site, split evenly among its type-compatible candidates.
+  constexpr uint64_t kCombineOncePerCall = 1024;
+  constexpr size_t kCombineMaxFanOut = 64;
+  for (const cg::FunctionNode &caller : graph.nodes()) {
+    if (!caller.IsExecutable || caller.Id >= nodeToSection.size())
+      continue;
+    if (!caller.HasRecord)
+      for (cg::NodeId callee : caller.DirectCallees)
+        if (callee != caller.Id && graph.isValid(callee) &&
+            graph[callee].IsExecutable && callee < nodeToSection.size())
+          addEdge(caller.Id, callee, kCombineOncePerCall);
+    for (const cg::IndirectCallSite &site :
+         graph.indirectCallSites(caller.Id)) {
+      size_t fanOut = site.Targets.size();
+      if (fanOut == 0 || fanOut > kCombineMaxFanOut)
+        continue;
+      uint64_t weight = std::max<uint64_t>(1, kCombineOncePerCall / fanOut);
+      for (cg::NodeId target : site.Targets)
+        if (target != caller.Id && graph[target].IsExecutable &&
+            target < nodeToSection.size())
+          addEdge(caller.Id, target, weight);
+    }
   }
 }
 
@@ -1577,6 +1613,8 @@ static CallGraphSectionMode getCallGraphSectionMode(Ctx &ctx,
   StringRef s = args.getLastArgValue(OPT_call_graph_section, "none");
   if (s == "only")
     return CallGraphSectionMode::Only;
+  if (s == "combine")
+    return CallGraphSectionMode::Combine;
   if (s != "none")
     ErrAlways(ctx) << "unknown --call-graph-section= value: " << s;
   return CallGraphSectionMode::None;
@@ -4042,6 +4080,15 @@ template <class ELFT> void LinkerDriver::link(opt::InputArgList &args) {
       if (args.hasArg(OPT_call_graph_ordering_file))
         Warn(ctx) << "--call-graph-ordering-file is ignored with "
                      "--call-graph-section=only";
+      readCallGraphFromCallGraphSection<ELFT>(ctx);
+    } else if (ctx.arg.callGraphSection == CallGraphSectionMode::Combine) {
+      if (auto *arg = args.getLastArg(OPT_call_graph_ordering_file)) {
+        if (std::optional<MemoryBufferRef> buffer =
+                readFile(ctx, arg->getValue()))
+          readCallGraph(ctx, *buffer);
+      } else {
+        readCallGraphsFromObjectFiles<ELFT>(ctx);
+      }
       readCallGraphFromCallGraphSection<ELFT>(ctx);
     } else if (auto *arg = args.getLastArg(OPT_call_graph_ordering_file)) {
       if (std::optional<MemoryBufferRef> buffer =

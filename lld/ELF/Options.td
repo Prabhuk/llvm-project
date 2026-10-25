@@ -138,9 +138,9 @@ def : FF<"no-call-graph-profile-sort">, Alias<call_graph_profile_sort>, AliasArg
   Flags<[HelpHidden]>;
 
 def call_graph_section: JJ<"call-graph-section=">,
-  HelpText<"Use the call graph reconstructed from .llvm.callgraph sections instead of a measured profile as the edge source for --call-graph-profile-sort (default: none)">,
-  MetaVarName<"[none,only]">,
-  Values<"none,only">;
+  HelpText<"Use the call graph reconstructed from .llvm.callgraph sections as the edge source for --call-graph-profile-sort: 'only' instead of a profile, 'combine' to add its indirect and assembly edges to the object files' call graph profile (default: none)">,
+  MetaVarName<"[none,only,combine]">,
+  Values<"none,only,combine">;
 def : FF<"call-graph-section">, Alias<call_graph_section>, AliasArgs<["only"]>,
   HelpText<"Alias for --call-graph-section=only">;
 def : FF<"no-call-graph-section">, Alias<call_graph_section>, AliasArgs<["none"]>,

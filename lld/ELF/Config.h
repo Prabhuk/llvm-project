@@ -108,7 +108,7 @@ enum class CGProfileSortKind { None, Hfsort, Cdsort };
 // for --call-graph-profile-sort. The sort algorithm is selected independently.
 //  - None: ignore SHT_LLVM_CALL_GRAPH sections.
 //  - Only: ignore any measured profile and use only the static call graph.
-enum class CallGraphSectionMode { None, Only };
+enum class CallGraphSectionMode { None, Only, Combine };
 
 // For --discard-{all,locals,none}.
 enum class DiscardPolicy { Default, All, Locals, None };
