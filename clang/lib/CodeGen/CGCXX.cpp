@@ -59,8 +59,8 @@ bool CodeGenModule::TryEmitBaseDestructorAsAlias(const CXXDestructorDecl *D) {
   const CXXRecordDecl *Class = D->getParent();
 
   // The complete object destructor of a dynamic class is reached by virtual
-  // calls identified after its class in the call graph section, which the
-  // destructor of the base class does not carry.
+  // calls identified after it in the call graph section, which the destructor
+  // of the base class does not carry.
   if (useVirtualCallGraphTypeIds() && Class->isDynamicClass())
     return true;
 

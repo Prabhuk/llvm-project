@@ -35,4 +35,4 @@ void test() {
 // CHECK:   ret void
 
 // CHECK: [[HEX_TYPE]] = !{[[HEX_TYPE_INNER:![0-9]+]]}
-// CHECK: [[HEX_TYPE_INNER]] = !{!"_ZTSMN12_GLOBAL__N_11bEFvNS_1aEE.virtual"}
+// CHECK: [[HEX_TYPE_INNER]] = !{!"_ZN12_GLOBAL__N_11b1cENS_1aE.virtual"}

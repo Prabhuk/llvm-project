@@ -707,8 +707,6 @@ private:
   MetadataTypeMap GeneralizedMetadataIdMap;
   MetadataTypeMap CallGraphMetadataIdMap;
   MetadataTypeMap CallGraphMemberMetadataIdMap;
-  MetadataTypeMap CallGraphVirtualMetadataIdMap;
-  MetadataTypeMap CallGraphDeletingMetadataIdMap;
 
   // Helps squashing blocks of TopLevelStmtDecl into a single llvm::Function
   // when used with -fincremental-extensions.
@@ -1814,18 +1812,18 @@ public:
 
   /// Returns true if virtual calls and the functions they can reach are
   /// identified in the call graph section after the method named at the call
-  /// site and its class, in addition to the member function type identifier.
+  /// site, in addition to the member function type identifier.
   bool useVirtualCallGraphTypeIds() const;
 
-  /// Create a type identifier for virtual calls to \p MD, qualified by the
-  /// class of \p MD. \p Deleting selects the identifier of calls to the
-  /// deleting destructor, which reach other functions than calls to the
-  /// complete object destructor through the same vtable.
+  /// Create a type identifier for virtual calls to the method \p MD.
+  /// \p Deleting selects the identifier of calls to the deleting destructor,
+  /// which reach other functions than calls to the complete object destructor
+  /// through the same vtable.
   llvm::Metadata *
   CreateMetadataIdentifierForVirtualCallGraphType(const CXXMethodDecl *MD,
                                                   bool Deleting);
 
-  /// Attach to \p F the class qualified type identifiers of every virtual call
+  /// Attach to \p F the type identifiers of every virtual call
   /// that can reach the virtual method or destructor variant \p GD, that is
   /// the identifiers of \p GD and of every method it overrides. If \p F is a
   /// thunk of \p GD, \p ThunkMethod is the method whose vtable entry it fills.

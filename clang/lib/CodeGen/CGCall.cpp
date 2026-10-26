@@ -6496,7 +6496,7 @@ RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
       }
       if (Callee.isVirtual() && CGM.useVirtualCallGraphTypeIds()) {
         // A virtual call reaches the final overriders of the method it names,
-        // which carry the identifier of that method qualified by its class
+        // which carry the identifier of that method
         // (see CodeGenModule::addVirtualCallGraphTypeMD).
         GlobalDecl VirtualGD = Callee.getVirtualMethodDecl();
         const auto *VirtualMD = cast<CXXMethodDecl>(VirtualGD.getDecl());

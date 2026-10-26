@@ -3693,14 +3693,13 @@ FindOverriddenMethodInPrimaryBases(const ASTContext &Context,
   return nullptr;
 }
 
-/// Returns true if \p Node is a class qualified type identifier of virtual
+/// Returns true if \p Node is a type identifier of virtual
 /// calls (see CodeGenModule::CreateMetadataIdentifierForVirtualCallGraphType).
 static bool isVirtualCallGraphTypeId(const llvm::MDNode *Node) {
   if (Node->getNumOperands() != 1)
     return false;
   const auto *Id = dyn_cast<llvm::MDString>(Node->getOperand(0));
-  return Id && (Id->getString().ends_with(".virtual") ||
-                Id->getString().ends_with(".virtual.deleting"));
+  return Id && Id->getString().ends_with(".virtual");
 }
 
 QualType CodeGenModule::GetCallGraphFunctionType(const FunctionDecl *FD) const {
@@ -3757,7 +3756,7 @@ void CodeGenModule::createIndirectFunctionTypeMD(const FunctionDecl *FD,
     // A function definition is annotated when its declaration is created and
     // again when its body is emitted. Replace the attachment instead of adding
     // a second one, so that a function carries exactly one type identifier
-    // besides the class qualified virtual call identifiers, which are kept.
+    // besides the virtual call identifiers, which are kept.
     SmallVector<llvm::MDNode *, 4> VirtualIds;
     F->getMetadata(llvm::LLVMContext::MD_callgraph, VirtualIds);
     llvm::erase_if(VirtualIds, [](const llvm::MDNode *Node) {
@@ -3781,20 +3780,21 @@ bool CodeGenModule::useVirtualCallGraphTypeIds() const {
 
 llvm::Metadata *CodeGenModule::CreateMetadataIdentifierForVirtualCallGraphType(
     const CXXMethodDecl *MD, bool Deleting) {
-  // The exception specification of an implicit method may not be evaluated in
-  // every translation unit, so leave it out of the identifier.
-  const auto *FPT = MD->getType()->castAs<FunctionProtoType>();
-  QualType FnType = getContext().getFunctionType(
-      FPT->getReturnType(), FPT->getParamTypes(),
-      FPT->getExtProtoInfo().withExceptionSpec(EST_None));
-  QualType T = getContext().getMemberPointerType(
-      FnType, /*Qualifier=*/std::nullopt, MD->getParent());
-  if (Deleting)
-    return CreateMetadataIdentifierImpl(T, CallGraphDeletingMetadataIdMap,
-                                        ".virtual.deleting",
-                                        /*ForceString=*/true);
-  return CreateMetadataIdentifierImpl(T, CallGraphVirtualMetadataIdMap,
-                                      ".virtual", /*ForceString=*/true);
+  // Identify the method itself by its mangled name, which every translation
+  // unit agrees on. Overriders have the name of the method they override, so
+  // methods of one class with the same type, such as a destructor and a
+  // void() method, do not share an identifier. A destructor is named after
+  // the vtable entry that the call goes through.
+  GlobalDecl GD;
+  if (const auto *Dtor = dyn_cast<CXXDestructorDecl>(MD))
+    GD = GlobalDecl(Dtor, Deleting ? Dtor_Deleting : Dtor_Complete);
+  else
+    GD = GlobalDecl(MD);
+  std::string Name;
+  llvm::raw_string_ostream Out(Name);
+  getCXXABI().getMangleContext().mangleName(GD, Out);
+  Out << ".virtual";
+  return llvm::MDString::get(getLLVMContext(), Name);
 }
 
 void CodeGenModule::addVirtualCallGraphTypeMD(

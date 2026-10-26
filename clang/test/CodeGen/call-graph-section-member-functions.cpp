@@ -43,7 +43,7 @@ void (*volatile FreeFnPtr)();
 
 // CHECK-LABEL: define {{.*}} @_Z3useP1AP1BMS_FvvE(
 void use(A *a, B *b, void (A::*pmf)()) {
-  // Virtual calls are identified after the method they name and its class
+  // Virtual calls are identified after the method they name
   // (see call-graph-section-virtual-class.cpp).
   // CHECK: call void %{{.*}}, !callee_type [[A_F_CT:![0-9]+]]
   a->f();
@@ -69,8 +69,8 @@ void use(A *a, B *b, void (A::*pmf)()) {
 // CHECK-DAG: [[MEMBER_CT]] = !{[[MEMBER]]}
 // CHECK-DAG: [[FREE_CT]] = !{[[FREE]]}
 // CHECK-DAG: [[A_F_CT]] = !{[[A_F:![0-9]+]]}
-// CHECK-DAG: [[A_F]] = !{!"_ZTSM1AFvvE.virtual"}
+// CHECK-DAG: [[A_F]] = !{!"_ZN1A1fEv.virtual"}
 // CHECK-DAG: [[A_DEL_CT]] = !{[[A_DEL:![0-9]+]]}
-// CHECK-DAG: [[A_DEL]] = !{!"_ZTSM1AFvvE.virtual.deleting"}
+// CHECK-DAG: [[A_DEL]] = !{!"_ZN1AD0Ev.virtual"}
 // CHECK-DAG: [[B_F_CT]] = !{[[B_F:![0-9]+]]}
-// CHECK-DAG: [[B_F]] = !{!"_ZTSM1BFvvE.virtual"}
+// CHECK-DAG: [[B_F]] = !{!"_ZN1B1fEv.virtual"}
