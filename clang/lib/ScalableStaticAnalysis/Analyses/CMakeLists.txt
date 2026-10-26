@@ -8,6 +8,8 @@ add_clang_library(clangScalableStaticAnalysisAnalyses
   CallGraph/CallGraphJSONFormat.cpp
   EntityPointerLevel/EntityPointerLevel.cpp
   EntityPointerLevel/EntityPointerLevelFormat.cpp
+  IndirectCallTargets/IndirectCallTargetsExtractor.cpp
+  IndirectCallTargets/IndirectCallTargetsFormat.cpp
   PointerFlow/PointerFlow.cpp
   PointerFlow/PointerFlowAnalysis.cpp
   PointerFlow/PointerFlowExtractor.cpp
@@ -29,6 +31,7 @@ add_clang_library(clangScalableStaticAnalysisAnalyses
   clangAnalysis
   clangBasic
   clangScalableStaticAnalysisCore
+  clangUnifiedSymbolResolution
 
   DEPENDS
   )
