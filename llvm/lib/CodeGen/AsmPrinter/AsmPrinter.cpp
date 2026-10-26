@@ -1878,7 +1878,7 @@ void AsmPrinter::emitCallGraphSection(const MachineFunction &MF,
   // a virtual method reached by calls typed after any method it overrides,
   // gets one more record for each of them. Readers merge the records of a
   // function.
-  if (IsIndirectTarget) {
+  if (IsIndirectTarget && TypeIds.size() > 1) {
     for (uint64_t ExtraTypeId : ArrayRef(TypeIds).drop_front()) {
       OutStreamer->emitInt8(callgraph::V_0);
       OutStreamer->emitInt8(static_cast<uint8_t>(Flags::IsIndirectTarget));
