@@ -1777,20 +1777,21 @@ void AsmPrinter::emitStackUsage(const MachineFunction &MF) {
     *StackUsageStream << "static\n";
 }
 
-/// Extracts a numeric type identifier of a Function's type from
-/// callgraph metadata. Returns null if metadata cannot be found.
-static ConstantInt *extractNumericCGTypeId(const Function &F) {
+/// Extracts the numeric type identifiers of a Function from callgraph
+/// metadata, in attachment order and without duplicates.
+static SmallVector<uint64_t, 1> extractNumericCGTypeIds(const Function &F) {
   SmallVector<MDNode *, 2> Types;
   F.getMetadata(LLVMContext::MD_callgraph, Types);
+  SmallVector<uint64_t, 1> TypeIds;
   for (const auto &Type : Types) {
     if (Type->getNumOperands() == 1 && isa<MDString>(Type->getOperand(0))) {
       MDString *MDTypeId = cast<MDString>(Type->getOperand(0));
       uint64_t TypeIdVal = llvm::MD5Hash(MDTypeId->getString());
-      IntegerType *Int64Ty = Type::getInt64Ty(F.getContext());
-      return ConstantInt::get(Int64Ty, TypeIdVal);
+      if (!is_contained(TypeIds, TypeIdVal))
+        TypeIds.push_back(TypeIdVal);
     }
   }
-  return nullptr;
+  return TypeIds;
 }
 
 /// Emits .llvm.callgraph section.
@@ -1850,9 +1851,9 @@ void AsmPrinter::emitCallGraphSection(const MachineFunction &MF,
   OutStreamer->emitInt8(callgraph::V_0);
   OutStreamer->emitInt8(static_cast<uint8_t>(CGFlags));
   OutStreamer->emitSymbolValue(getSymbol(&F), ProgramPointerSize);
-  const auto *TypeId = extractNumericCGTypeId(F);
-  if (IsIndirectTarget && TypeId)
-    OutStreamer->emitInt64(TypeId->getZExtValue());
+  const SmallVector<uint64_t, 1> TypeIds = extractNumericCGTypeIds(F);
+  if (IsIndirectTarget && !TypeIds.empty())
+    OutStreamer->emitInt64(TypeIds.front());
   else
     OutStreamer->emitInt64(0);
 
@@ -1872,6 +1873,18 @@ void AsmPrinter::emitCallGraphSection(const MachineFunction &MF,
             FuncCGInfo.IndirectCalleeFrequencies.lookup(CalleeTypeId));
     FuncCGInfo.IndirectCalleeTypeIDs.clear();
     FuncCGInfo.IndirectCalleeFrequencies.clear();
+  }
+  // A function that can be reached through several type identifiers, such as
+  // a virtual method reached by calls typed after any method it overrides,
+  // gets one more record for each of them. Readers merge the records of a
+  // function.
+  if (IsIndirectTarget) {
+    for (uint64_t ExtraTypeId : ArrayRef(TypeIds).drop_front()) {
+      OutStreamer->emitInt8(callgraph::V_0);
+      OutStreamer->emitInt8(static_cast<uint8_t>(Flags::IsIndirectTarget));
+      OutStreamer->emitSymbolValue(getSymbol(&F), ProgramPointerSize);
+      OutStreamer->emitInt64(ExtraTypeId);
+    }
   }
   // End of emitting call graph section contents.
   OutStreamer->popSection();
