@@ -3693,6 +3693,16 @@ FindOverriddenMethodInPrimaryBases(const ASTContext &Context,
   return nullptr;
 }
 
+/// Returns true if \p Node is a class qualified type identifier of virtual
+/// calls (see CodeGenModule::CreateMetadataIdentifierForVirtualCallGraphType).
+static bool isVirtualCallGraphTypeId(const llvm::MDNode *Node) {
+  if (Node->getNumOperands() != 1)
+    return false;
+  const auto *Id = dyn_cast<llvm::MDString>(Node->getOperand(0));
+  return Id && (Id->getString().ends_with(".virtual") ||
+                Id->getString().ends_with(".virtual.deleting"));
+}
+
 QualType CodeGenModule::GetCallGraphFunctionType(const FunctionDecl *FD) const {
   // A virtual call is typed after the method named at the call site, so every
   // function that the vtable entry of that method can hold must carry the same
@@ -3746,13 +3756,122 @@ void CodeGenModule::createIndirectFunctionTypeMD(const FunctionDecl *FD,
 
     // A function definition is annotated when its declaration is created and
     // again when its body is emitted. Replace the attachment instead of adding
-    // a second one, so that a function carries exactly one type identifier.
+    // a second one, so that a function carries exactly one type identifier
+    // besides the class qualified virtual call identifiers, which are kept.
+    SmallVector<llvm::MDNode *, 4> VirtualIds;
+    F->getMetadata(llvm::LLVMContext::MD_callgraph, VirtualIds);
+    llvm::erase_if(VirtualIds, [](const llvm::MDNode *Node) {
+      return !isVirtualCallGraphTypeId(Node);
+    });
     const auto *MD = dyn_cast<CXXMethodDecl>(Def);
     bool IsMember = MD && MD->isInstance();
     F->setMetadata(llvm::LLVMContext::MD_callgraph,
                    llvm::MDTuple::get(getLLVMContext(),
                                       {CreateMetadataIdentifierForCallGraphType(
                                           QT, IsMember)}));
+    for (llvm::MDNode *Node : VirtualIds)
+      F->addMetadata(llvm::LLVMContext::MD_callgraph, *Node);
+  }
+}
+
+bool CodeGenModule::useVirtualCallGraphTypeIds() const {
+  return CodeGenOpts.CallGraphSection &&
+         getTarget().getCXXABI().isItaniumFamily();
+}
+
+llvm::Metadata *CodeGenModule::CreateMetadataIdentifierForVirtualCallGraphType(
+    const CXXMethodDecl *MD, bool Deleting) {
+  // The exception specification of an implicit method may not be evaluated in
+  // every translation unit, so leave it out of the identifier.
+  const auto *FPT = MD->getType()->castAs<FunctionProtoType>();
+  QualType FnType = getContext().getFunctionType(
+      FPT->getReturnType(), FPT->getParamTypes(),
+      FPT->getExtProtoInfo().withExceptionSpec(EST_None));
+  QualType T = getContext().getMemberPointerType(
+      FnType, /*Qualifier=*/std::nullopt, MD->getParent());
+  if (Deleting)
+    return CreateMetadataIdentifierImpl(T, CallGraphDeletingMetadataIdMap,
+                                        ".virtual.deleting",
+                                        /*ForceString=*/true);
+  return CreateMetadataIdentifierImpl(T, CallGraphVirtualMetadataIdMap,
+                                      ".virtual", /*ForceString=*/true);
+}
+
+void CodeGenModule::addVirtualCallGraphTypeMD(
+    GlobalDecl GD, llvm::Function *F, const CXXMethodDecl *ThunkMethod) {
+  if (!useVirtualCallGraphTypeIds())
+    return;
+  const auto *MD = dyn_cast<CXXMethodDecl>(GD.getDecl());
+  if (!MD || !MD->isVirtual())
+    return;
+
+  // A virtual call to a method reaches a final overrider of that method in
+  // the dynamic class of the object, so a function is reached by the calls to
+  // the method it defines and to every method that method overrides. A thunk
+  // is reached by the same calls as its target, through other vtable entries.
+  SmallVector<const CXXMethodDecl *, 8> Methods;
+  llvm::SmallPtrSet<const CXXMethodDecl *, 8> Seen;
+  auto Add = [&](const CXXMethodDecl *M) {
+    if (Seen.insert(M->getCanonicalDecl()).second)
+      Methods.push_back(M);
+  };
+  Add(MD);
+  if (ThunkMethod)
+    Add(ThunkMethod);
+  for (size_t I = 0; I != Methods.size(); ++I) {
+    const CXXMethodDecl *M = Methods[I];
+    if (isa<CXXDestructorDecl>(M)) {
+      // A virtual destructor overrides the destructor of every base class.
+      // The destructor of a dynamic class is always declared.
+      M->getParent()->forallBases([&](const CXXRecordDecl *Base) {
+        if (const CXXDestructorDecl *BaseDtor = Base->getDestructor())
+          if (BaseDtor->isVirtual())
+            Add(BaseDtor);
+        return true;
+      });
+      continue;
+    }
+    for (const CXXMethodDecl *Overridden : M->overridden_methods())
+      Add(Overridden);
+  }
+
+  // Calls through the deleting destructor entry and through the complete
+  // object destructor entry have separate identifiers. A base object
+  // destructor is not in the vtable, but a complete object destructor can be
+  // emitted as its alias.
+  bool Plain = true;
+  bool Deleting = false;
+  if (isa<CXXDestructorDecl>(MD)) {
+    switch (GD.getDtorType()) {
+    case Dtor_Complete:
+    case Dtor_Base:
+      break;
+    case Dtor_Deleting:
+      Plain = false;
+      Deleting = true;
+      break;
+    default:
+      Deleting = true;
+      break;
+    }
+  }
+
+  SmallVector<llvm::MDNode *, 4> Existing;
+  F->getMetadata(llvm::LLVMContext::MD_callgraph, Existing);
+  llvm::SmallPtrSet<const llvm::Metadata *, 8> Attached;
+  for (const llvm::MDNode *Node : Existing)
+    if (Node->getNumOperands() == 1)
+      Attached.insert(Node->getOperand(0));
+  auto Attach = [&](llvm::Metadata *Id) {
+    if (Attached.insert(Id).second)
+      F->addMetadata(llvm::LLVMContext::MD_callgraph,
+                     *llvm::MDTuple::get(getLLVMContext(), {Id}));
+  };
+  for (const CXXMethodDecl *M : Methods) {
+    if (Plain)
+      Attach(CreateMetadataIdentifierForVirtualCallGraphType(M, false));
+    if (Deleting)
+      Attach(CreateMetadataIdentifierForVirtualCallGraphType(M, true));
   }
 }
 
@@ -3785,12 +3904,16 @@ void CodeGenModule::createFunctionTypeMetadataForIcall(const FunctionDecl *FD,
 void CodeGenModule::createCalleeTypeMetadataForIcall(const QualType &QT,
                                                      llvm::CallBase *CB,
                                                      bool IsMember) {
+  createCalleeTypeMetadataForIcall(
+      CreateMetadataIdentifierForCallGraphType(QT, IsMember), CB);
+}
+
+void CodeGenModule::createCalleeTypeMetadataForIcall(llvm::Metadata *TypeIdMD,
+                                                     llvm::CallBase *CB) {
   // Only if needed for call graph section and only for indirect calls
   if (!CodeGenOpts.CallGraphSection || !CB->isIndirectCall())
     return;
 
-  llvm::Metadata *TypeIdMD =
-      CreateMetadataIdentifierForCallGraphType(QT, IsMember);
   llvm::MDTuple *TypeTuple = llvm::MDTuple::get(getLLVMContext(), {TypeIdMD});
   llvm::MDTuple *MDN = llvm::MDNode::get(getLLVMContext(), {TypeTuple});
   CB->setMetadata(llvm::LLVMContext::MD_callee_type, MDN);
@@ -3932,8 +4055,10 @@ void CodeGenModule::SetFunctionAttributes(GlobalDecl GD, llvm::Function *F,
       !CodeGenOpts.SanitizeCfiCanonicalJumpTables)
     createFunctionTypeMetadataForIcall(FD, F);
 
-  if (CodeGenOpts.CallGraphSection)
+  if (CodeGenOpts.CallGraphSection) {
     createIndirectFunctionTypeMD(FD, F);
+    addVirtualCallGraphTypeMD(GD, F);
+  }
 
   if (LangOpts.Sanitize.has(SanitizerKind::KCFI))
     setKCFIType(FD, F);

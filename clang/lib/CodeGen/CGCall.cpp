@@ -6494,8 +6494,22 @@ RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
 
         CGM.getDiags().Report(Loc, diag::warn_cgs_no_proto) << CST << TypeStr;
       }
-      CGM.createCalleeTypeMetadataForIcall(CST, CI,
-                                           CallInfo.isInstanceMethod());
+      if (Callee.isVirtual() && CGM.useVirtualCallGraphTypeIds()) {
+        // A virtual call reaches the final overriders of the method it names,
+        // which carry the identifier of that method qualified by its class
+        // (see CodeGenModule::addVirtualCallGraphTypeMD).
+        GlobalDecl VirtualGD = Callee.getVirtualMethodDecl();
+        const auto *VirtualMD = cast<CXXMethodDecl>(VirtualGD.getDecl());
+        bool Deleting = isa<CXXDestructorDecl>(VirtualMD) &&
+                        VirtualGD.getDtorType() == Dtor_Deleting;
+        CGM.createCalleeTypeMetadataForIcall(
+            CGM.CreateMetadataIdentifierForVirtualCallGraphType(VirtualMD,
+                                                                Deleting),
+            CI);
+      } else {
+        CGM.createCalleeTypeMetadataForIcall(CST, CI,
+                                             CallInfo.isInstanceMethod());
+      }
     }
   }
 

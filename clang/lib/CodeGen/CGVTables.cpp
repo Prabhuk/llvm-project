@@ -655,6 +655,8 @@ llvm::Constant *CodeGenVTables::maybeEmitThunk(GlobalDecl GD,
   // the thunk was created (see CodeGenModule::GetCallGraphFunctionType).
   if (CGM.getCodeGenOpts().CallGraphSection && TI.Method)
     CGM.createIndirectFunctionTypeMD(TI.Method, ThunkFn);
+  if (CGM.getCodeGenOpts().CallGraphSection)
+    CGM.addVirtualCallGraphTypeMD(GD, ThunkFn, TI.Method);
 
   setThunkProperties(CGM, TI, ThunkFn, ForVTable, GD);
   return ThunkFn;

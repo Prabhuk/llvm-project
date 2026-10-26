@@ -23,12 +23,12 @@ struct C : A, B {
   ~C() override;
 };
 
-// CHECK-DAG: define {{.*}} @_ZN1A1fEv({{.*}} !callgraph [[MEMBER:![0-9]+]]
-// CHECK-DAG: define {{.*}} @_ZN1AD0Ev({{.*}} !callgraph [[MEMBER]]
-// CHECK-DAG: define {{.*}} @_ZN1A1gEv({{.*}} !callgraph [[MEMBER]]
-// CHECK-DAG: define {{.*}} @_ZN1A1sEv({{.*}} !callgraph [[FREE:![0-9]+]]
-// CHECK-DAG: define {{.*}} @_ZThn8_N1C1fEv({{.*}} !callgraph [[MEMBER]]
-// CHECK-DAG: define {{.*}} @_Z6freefnv({{.*}} !callgraph [[FREE]]
+// CHECK-DAG: define {{.*}} @_ZN1A1fEv({{[^!]*}}!callgraph [[MEMBER:![0-9]+]]
+// CHECK-DAG: define {{.*}} @_ZN1AD0Ev({{[^!]*}}!callgraph [[MEMBER]]
+// CHECK-DAG: define {{.*}} @_ZN1A1gEv({{[^!]*}}!callgraph [[MEMBER]]
+// CHECK-DAG: define {{.*}} @_ZN1A1sEv({{[^!]*}}!callgraph [[FREE:![0-9]+]]
+// CHECK-DAG: define {{.*}} @_ZThn8_N1C1fEv({{[^!]*}}!callgraph [[MEMBER]]
+// CHECK-DAG: define {{.*}} @_Z6freefnv({{[^!]*}}!callgraph [[FREE]]
 void A::f() {}
 A::~A() {}
 void A::g() {}
@@ -43,11 +43,13 @@ void (*volatile FreeFnPtr)();
 
 // CHECK-LABEL: define {{.*}} @_Z3useP1AP1BMS_FvvE(
 void use(A *a, B *b, void (A::*pmf)()) {
-  // CHECK: call void %{{.*}}, !callee_type [[MEMBER_CT:![0-9]+]]
+  // Virtual calls are identified after the method they name and its class
+  // (see call-graph-section-virtual-class.cpp).
+  // CHECK: call void %{{.*}}, !callee_type [[A_F_CT:![0-9]+]]
   a->f();
-  // CHECK: call void %{{.*}}, !callee_type [[MEMBER_CT]]
+  // CHECK: call void %{{.*}}, !callee_type [[A_DEL_CT:![0-9]+]]
   delete a;
-  // CHECK: call void %{{.*}}, !callee_type [[MEMBER_CT]]
+  // CHECK: call void %{{.*}}, !callee_type [[MEMBER_CT:![0-9]+]]
   (a->*pmf)();
   // CHECK: call void %{{.*}}, !callee_type [[FREE_CT:![0-9]+]]
   FreeFnPtr();
@@ -58,7 +60,7 @@ void use(A *a, B *b, void (A::*pmf)()) {
   void (*lp)() = l;
   // CHECK: call void %{{.*}}, !callee_type [[FREE_CT]]
   lp();
-  // CHECK: call void %{{.*}}, !callee_type [[MEMBER_CT]]
+  // CHECK: call void %{{.*}}, !callee_type [[B_F_CT:![0-9]+]]
   b->f();
 }
 
@@ -66,3 +68,9 @@ void use(A *a, B *b, void (A::*pmf)()) {
 // CHECK-DAG: [[FREE]] = !{!"_ZTSFvvE"}
 // CHECK-DAG: [[MEMBER_CT]] = !{[[MEMBER]]}
 // CHECK-DAG: [[FREE_CT]] = !{[[FREE]]}
+// CHECK-DAG: [[A_F_CT]] = !{[[A_F:![0-9]+]]}
+// CHECK-DAG: [[A_F]] = !{!"_ZTSM1AFvvE.virtual"}
+// CHECK-DAG: [[A_DEL_CT]] = !{[[A_DEL:![0-9]+]]}
+// CHECK-DAG: [[A_DEL]] = !{!"_ZTSM1AFvvE.virtual.deleting"}
+// CHECK-DAG: [[B_F_CT]] = !{[[B_F:![0-9]+]]}
+// CHECK-DAG: [[B_F]] = !{!"_ZTSM1BFvvE.virtual"}
